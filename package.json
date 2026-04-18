@@ -1,0 +1,10 @@
+{
+  "name": "opendrive-web-tool",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Web OpenDRIVE editor and validator based on VTS check_map rules",
+  "scripts": {
+    "build:native": "cmake -S native -B native/build && cmake --build native/build --target odr_json_parser -j 4",
+    "start": "node src/server.js"
+  }
+}

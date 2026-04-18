@@ -1,0 +1,8 @@
+{
+	"InstallScripts" : 
+	[
+		"/Users/jiang/Desktop/web/opendrive_web_tool/native/build/cmake_install.cmake",
+		"/Users/jiang/Desktop/web/opendrive_web_tool/native/build/libOpenDRIVE/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

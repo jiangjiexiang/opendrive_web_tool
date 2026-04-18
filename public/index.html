@@ -1,0 +1,2011 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>OpenDRIVE Editor</title>
+  <style>
+    :root {
+      --bg: #171a1f;
+      --panel: #20252d;
+      --panel-2: #272d37;
+      --line: #353d49;
+      --text: #eef2f8;
+      --muted: #9ba8ba;
+      --accent: #29b48e;
+      --accent-2: #5ea5ff;
+      --danger: #ff5f6d;
+      --warn: #f0b356;
+      --ok: #55d38f;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; margin: 0; }
+    body {
+      font-family: "PingFang SC", "SF Pro Text", "Segoe UI", sans-serif;
+      background: radial-gradient(circle at 20% 0%, #202633 0%, #171a1f 45%);
+      color: var(--text);
+      overflow: hidden;
+    }
+
+    .app {
+      width: 100%;
+      height: 100%;
+      display: grid;
+      grid-template-rows: 56px 1fr;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--line);
+      background: rgba(18, 22, 28, 0.92);
+      backdrop-filter: blur(8px);
+      padding: 0 14px;
+      gap: 12px;
+    }
+
+    .brand {
+      display: flex;
+      flex-direction: column;
+      line-height: 1.1;
+    }
+
+    .brand strong { font-size: 15px; letter-spacing: 0.2px; }
+    .brand span { font-size: 11px; color: var(--muted); margin-top: 3px; }
+
+    .top-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .workspace {
+      display: grid;
+      grid-template-columns: 240px 1fr 360px;
+      min-height: 0;
+    }
+
+    .left-rail {
+      border-right: 1px solid var(--line);
+      background: #1b2028;
+      padding: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      align-items: stretch;
+      min-width: 0;
+      overflow: hidden;
+    }
+
+    .left-actions {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .left-rail button {
+      font-size: 13px;
+      padding: 9px 10px;
+      text-align: left;
+    }
+
+    .left-roads {
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      flex: 1;
+    }
+
+    .left-roads h3 {
+      margin: 0 0 8px;
+      font-size: 13px;
+      color: #d7dfee;
+      letter-spacing: 0.2px;
+    }
+
+    .center-stage {
+      position: relative;
+      min-width: 0;
+      min-height: 0;
+      background: #13171d;
+    }
+
+    .canvas-wrap {
+      position: absolute;
+      inset: 0;
+      background:
+        linear-gradient(transparent 31px, #1d232d 32px),
+        linear-gradient(90deg, transparent 31px, #1d232d 32px);
+      background-size: 32px 32px;
+    }
+
+    canvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+      cursor: crosshair;
+    }
+
+    .stage-tip {
+      position: absolute;
+      left: 12px;
+      bottom: 12px;
+      background: rgba(10, 12, 15, 0.65);
+      border: 1px solid #2f3742;
+      color: var(--muted);
+      font-size: 12px;
+      padding: 8px 10px;
+      border-radius: 8px;
+      pointer-events: none;
+    }
+
+    .road-popup {
+      position: absolute;
+      z-index: 6;
+      min-width: 280px;
+      max-width: 320px;
+      background: rgba(25, 31, 40, 0.96);
+      border: 1px solid #455267;
+      border-radius: 10px;
+      box-shadow: 0 12px 28px rgba(0, 0, 0, 0.42);
+      padding: 10px;
+      display: none;
+    }
+
+    .road-popup.show {
+      display: block;
+    }
+
+    .road-popup h4 {
+      margin: 0 0 8px;
+      font-size: 13px;
+      color: #e8eef8;
+    }
+
+    .right-panel {
+      border-left: 1px solid var(--line);
+      background: var(--panel);
+      overflow: auto;
+      padding: 12px;
+    }
+
+    .section {
+      background: var(--panel-2);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px;
+      margin-bottom: 10px;
+    }
+
+    .section h3 {
+      margin: 0 0 9px;
+      font-size: 13px;
+      letter-spacing: 0.2px;
+      color: #d7dfee;
+    }
+
+    .grid2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 7px;
+    }
+
+    label {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      font-size: 11px;
+      color: var(--muted);
+    }
+
+    input, select, textarea, button {
+      font-family: inherit;
+    }
+
+    input, select, textarea {
+      width: 100%;
+      border: 1px solid #3a4452;
+      background: #161b22;
+      color: var(--text);
+      border-radius: 8px;
+      padding: 7px 9px;
+      font-size: 13px;
+    }
+
+    textarea {
+      min-height: 170px;
+      resize: vertical;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px;
+      line-height: 1.35;
+    }
+
+    .btn, button {
+      border: 1px solid #3c4655;
+      background: #2b3340;
+      color: #eaf0fa;
+      border-radius: 8px;
+      padding: 8px 10px;
+      font-size: 12px;
+      cursor: pointer;
+      transition: all .12s ease;
+    }
+
+    .btn:hover, button:hover { filter: brightness(1.08); }
+
+    .btn.primary, button.primary {
+      background: #1f745f;
+      border-color: #28997b;
+    }
+
+    .btn.secondary, button.secondary {
+      background: #2d5f9a;
+      border-color: #3a78c0;
+    }
+
+    .btn.danger, button.danger {
+      background: #7f2730;
+      border-color: #a13745;
+    }
+
+    button.active {
+      outline: 2px solid #77c6ff;
+      outline-offset: 1px;
+    }
+
+    .stack { display: flex; flex-direction: column; gap: 8px; }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; }
+
+    .road-list {
+      max-height: none;
+      min-height: 120px;
+      flex: 1;
+      overflow: auto;
+      border: 1px solid #3a4452;
+      border-radius: 8px;
+      background: #141920;
+      padding: 5px;
+      font-size: 12px;
+    }
+
+    .road-item {
+      border: 1px solid transparent;
+      border-radius: 6px;
+      padding: 6px;
+      cursor: pointer;
+      color: #dbe6f7;
+    }
+
+    .road-item:hover { background: #25303d; }
+    .road-item.sel {
+      border-color: #55a6ff;
+      background: #23384f;
+    }
+
+    .road-item .meta {
+      margin-top: 3px;
+      color: #9fb2cb;
+      font-size: 11px;
+    }
+
+    .road-item .children {
+      margin-top: 4px;
+      color: #7fd3bb;
+      font-size: 11px;
+    }
+
+    .check-summary {
+      font-size: 12px;
+      color: var(--muted);
+      margin: 2px 0 0;
+    }
+
+    .log {
+      margin-top: 6px;
+      max-height: 120px;
+      overflow: auto;
+      border: 1px solid #3a4452;
+      background: #121820;
+      border-radius: 8px;
+      padding: 8px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11px;
+      line-height: 1.45;
+    }
+
+    .ok { color: var(--ok); }
+    .warn { color: var(--warn); }
+    .err { color: var(--danger); }
+
+    @media (max-width: 1180px) {
+      .workspace {
+        grid-template-columns: 190px 1fr;
+      }
+      .right-panel {
+        position: absolute;
+        right: 0;
+        top: 56px;
+        bottom: 0;
+        width: min(88vw, 380px);
+        z-index: 5;
+        box-shadow: -10px 0 24px rgba(0, 0, 0, 0.35);
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <strong>OpenDRIVE Editor</strong>
+        <span>Inspired by odrviewer layout</span>
+      </div>
+      <div class="top-actions">
+        <input id="xodr_file" type="file" accept=".xodr,.xml,text/xml,application/xml" style="max-width: 210px;" />
+        <button id="btn_import_xodr">导入 XODR</button>
+        <input id="bg_file" type="file" accept="image/*" style="max-width: 210px;" />
+        <button id="btn_fit">适配视图</button>
+        <button id="btn_validate" class="secondary">校验</button>
+        <button id="btn_gen" class="primary">生成 XODR</button>
+        <button id="btn_download">下载</button>
+      </div>
+    </header>
+
+    <div class="workspace">
+      <aside class="left-rail">
+        <div class="left-actions">
+          <button id="btn_mode_draw" class="primary active">绘制模式</button>
+          <button id="btn_mode_select">选择模式</button>
+          <button id="btn_mode_connect">自动连接两路</button>
+          <button id="btn_mode_extend">端点延伸绘制</button>
+          <button id="btn_finish" class="secondary">完成当前道路</button>
+          <button id="btn_undo">撤销上一步</button>
+          <button id="btn_delete" class="danger">删除选中道路</button>
+        </div>
+        <section class="left-roads">
+          <h3>Roads</h3>
+          <div id="road_list" class="road-list"></div>
+        </section>
+      </aside>
+
+      <main class="center-stage">
+        <div class="canvas-wrap">
+          <canvas id="map_canvas" width="1280" height="720"></canvas>
+        </div>
+        <div class="stage-tip">左键加点绘路，滚轮缩放，空格+拖动平移</div>
+        <div id="road_popup" class="road-popup">
+          <h4>道路属性</h4>
+          <div class="grid2">
+            <label>road id<input id="p_id" /></label>
+            <label>junction<input id="p_junction" /></label>
+            <label>长度(m)<input id="p_length" type="number" step="0.1" /></label>
+            <label>左侧车道宽(m)<input id="p_left_lane_width" type="number" step="0.1" min="0.5" /></label>
+            <label>左车道数<input id="p_left" type="number" min="0" /></label>
+            <label>右车道数<input id="p_right" type="number" min="0" /></label>
+            <label>右侧车道宽(m)<input id="p_right_lane_width" type="number" step="0.1" min="0.5" /></label>
+            <label>pred type
+              <select id="p_pred_type">
+                <option value="road">road</option>
+                <option value="junction">junction</option>
+              </select>
+            </label>
+            <label>pred id<input id="p_pred_id" /></label>
+            <label>succ type
+              <select id="p_succ_type">
+                <option value="road">road</option>
+                <option value="junction">junction</option>
+              </select>
+            </label>
+            <label>succ id<input id="p_succ_id" /></label>
+            <label>车道模式
+              <select id="p_lane_mode">
+                <option value="custom">自定义</option>
+                <option value="oneway_single">单向单车道</option>
+                <option value="oneway_double">单向双车道</option>
+                <option value="twoway_two">双向两车道(三线)</option>
+                <option value="twoway_four">双向四车道</option>
+              </select>
+            </label>
+            <label>center type
+              <select id="p_center_type">
+                <option value="none">none</option>
+                <option value="driving">driving</option>
+                <option value="sidewalk">sidewalk</option>
+                <option value="bicycle">bicycle</option>
+              </select>
+            </label>
+          </div>
+          <div class="row" style="margin-top: 8px;">
+            <button id="btn_popup_apply" class="primary">应用</button>
+            <button id="btn_popup_close">关闭</button>
+          </div>
+        </div>
+      </main>
+
+      <aside class="right-panel">
+        <section class="section">
+          <h3>Header</h3>
+          <div class="grid2">
+            <label>地图名<input id="h_name" value="web_editor_map" /></label>
+            <label>vendor<input id="h_vendor" value="opendrive_web_tool" /></label>
+            <label>north<input id="h_north" type="number" value="1000" /></label>
+            <label>south<input id="h_south" type="number" value="0" /></label>
+            <label>east<input id="h_east" type="number" value="1000" /></label>
+            <label>west<input id="h_west" type="number" value="0" /></label>
+          </div>
+        </section>
+
+        <section class="section">
+          <h3>检查结果</h3>
+          <div id="check_summary" class="check-summary"></div>
+          <div id="check_log" class="log"></div>
+        </section>
+
+        <section class="section">
+          <h3>XODR</h3>
+          <textarea id="xodr_text" placeholder="生成的 xodr 文本"></textarea>
+        </section>
+      </aside>
+    </div>
+  </div>
+
+  <script>
+  (() => {
+    const $ = (id) => document.getElementById(id);
+    const canvas = $('map_canvas');
+    const ctx = canvas.getContext('2d');
+    const canvasWrap = canvas.parentElement;
+    const roadPopup = $('road_popup');
+
+    const roads = [];
+    let selectedRoadIndex = -1;
+    let drawingPoints = [];
+    let lastXodr = '';
+    let connectSelection = [];
+    let extendDraft = null;
+
+    let mode = 'draw';
+    let bgImage = null;
+
+    const view = {
+      scale: 1,
+      offsetX: 0,
+      offsetY: 0,
+      panning: false,
+      panStartX: 0,
+      panStartY: 0,
+      baseOffsetX: 0,
+      baseOffsetY: 0,
+      spaceDown: false
+    };
+    const LANE_VISUAL_WIDTH = 3.5;
+    const SPIRAL_SN = [-2.9918191940101985e3, 7.088400452577386e5, -6.297414862058625e7, 2.5489088057337637e9, -4.429795180596978e10, 3.180162978765678e11];
+    const SPIRAL_SD = [2.813762688899943e2, 4.558478108065326e4, 5.173438887700964e6, 4.1932024589811125e8, 2.244117956453409e10, 6.073663894900846e11];
+    const SPIRAL_CN = [-4.9884311457357355e-8, 9.504280628298596e-6, -6.451914356839651e-4, 1.8884331939670385e-2, -2.055259009550139e-1, 1];
+    const SPIRAL_CD = [3.99982968972496e-12, 9.154392157746575e-10, 1.2500186247959882e-7, 1.2226278902417904e-5, 8.680295429417843e-4, 4.121420907221998e-2, 1];
+    const SPIRAL_FN = [4.2154355504367755e-1, 1.4340791978075888e-1, 1.1522095507358576e-2, 3.4501793978257404e-4, 4.636137492878673e-6, 3.055689837902576e-8, 1.0230451416490723e-10, 1.7201074326816183e-13, 1.3428327623306276e-16, 3.763297112699879e-20];
+    const SPIRAL_FD = [7.515863983533789e-1, 1.1688892585919138e-1, 6.440515265088586e-3, 1.5593440916415303e-4, 1.8462756734893054e-6, 1.1269922476399903e-8, 3.601400295893714e-11, 5.887545336215784e-14, 4.520014340741297e-17, 1.2544323709001126e-20];
+    const SPIRAL_GN = [5.044420736433833e-1, 1.9710283352552342e-1, 1.8764858409257524e-2, 6.840793809153931e-4, 1.1513882611188428e-5, 9.828524436884222e-8, 4.4534441586175015e-10, 1.0826804113902087e-12, 1.375554606332618e-15, 8.363544356306774e-19, 1.8695871016278323e-22];
+    const SPIRAL_GD = [1.4749575992512833, 3.3774898912001997e-1, 2.536037414203388e-2, 8.146791071843062e-4, 1.2754507566772912e-5, 1.0431458965757199e-7, 4.606807281465204e-10, 1.1027321506624026e-12, 1.3879653125957886e-15, 8.391588162831187e-19, 1.8695871016278323e-22];
+
+    function polylineLength(points) {
+      let total = 0;
+      for (let i = 1; i < points.length; i += 1) {
+        total += Math.hypot(points[i].x - points[i - 1].x, points[i].y - points[i - 1].y);
+      }
+      return total;
+    }
+
+    function polevl(x, coef) {
+      let ans = coef[0];
+      for (let i = 1; i < coef.length; i += 1) {
+        ans = ans * x + coef[i];
+      }
+      return ans;
+    }
+
+    function p1evl(x, coef) {
+      let ans = x + coef[0];
+      for (let i = 1; i < coef.length; i += 1) {
+        ans = ans * x + coef[i];
+      }
+      return ans;
+    }
+
+    function fresnel(xxa) {
+      let x = Math.abs(xxa);
+      let x2 = x * x;
+      let cc;
+      let ss;
+
+      if (x2 < 2.5625) {
+        const t = x2 * x2;
+        ss = x * x2 * polevl(t, SPIRAL_SN) / p1evl(t, SPIRAL_SD);
+        cc = x * polevl(t, SPIRAL_CN) / polevl(t, SPIRAL_CD);
+      } else if (x > 36974.0) {
+        cc = 0.5;
+        ss = 0.5;
+      } else {
+        x2 = x * x;
+        let t = Math.PI * x2;
+        const u = 1.0 / (t * t);
+        t = 1.0 / t;
+        const f = 1.0 - u * polevl(u, SPIRAL_FN) / p1evl(u, SPIRAL_FD);
+        const g = t * polevl(u, SPIRAL_GN) / p1evl(u, SPIRAL_GD);
+
+        t = Math.PI * 0.5 * x2;
+        const c = Math.cos(t);
+        const s = Math.sin(t);
+        const tx = Math.PI * x;
+        cc = 0.5 + (f * s - g * c) / tx;
+        ss = 0.5 - (f * c + g * s) / tx;
+      }
+
+      if (xxa < 0.0) {
+        cc = -cc;
+        ss = -ss;
+      }
+
+      return { cc, ss };
+    }
+
+    function odrSpiral(s, cDot) {
+      let a = 1.0 / Math.sqrt(Math.abs(cDot));
+      a *= Math.sqrt(Math.PI);
+
+      const fres = fresnel(s / a);
+      let x = fres.cc * a;
+      let y = fres.ss * a;
+
+      if (cDot < 0.0) {
+        y *= -1.0;
+      }
+
+      return {
+        x,
+        y,
+        t: s * s * cDot * 0.5
+      };
+    }
+
+    function sampleSpiralPoint(g, sAbs) {
+      const s0 = Number(g.s || 0);
+      const x0 = Number(g.x || 0);
+      const y0 = Number(g.y || 0);
+      const hdg0 = Number(g.hdg || 0);
+      const len = Number(g.length || 0);
+      const curvStart = Number(g.curvStart || 0);
+      const curvEnd = Number(g.curvEnd || 0);
+
+      if (len <= 0) {
+        return { x: x0, y: y0, s: s0, hdg: hdg0 };
+      }
+
+      if (Math.abs(curvStart) < 1e-9 && Math.abs(curvEnd) < 1e-9) {
+        const ds = sAbs - s0;
+        return { x: x0 + Math.cos(hdg0) * ds, y: y0 + Math.sin(hdg0) * ds, s: sAbs, hdg: hdg0 };
+      }
+
+      if (Math.abs(curvEnd - curvStart) < 1e-9) {
+        const k = curvStart;
+        if (Math.abs(k) < 1e-9) {
+          const ds = sAbs - s0;
+          return { x: x0 + Math.cos(hdg0) * ds, y: y0 + Math.sin(hdg0) * ds, s: sAbs, hdg: hdg0 };
+        }
+        const theta = (sAbs - s0) * k;
+        const r = 1 / k;
+        const cx = x0 - Math.sin(hdg0) * r;
+        const cy = y0 + Math.cos(hdg0) * r;
+        const alpha0 = Math.atan2(y0 - cy, x0 - cx);
+        const alpha = alpha0 + theta;
+        return {
+          x: cx + r * Math.cos(alpha),
+          y: cy + r * Math.sin(alpha),
+          s: sAbs,
+          hdg: hdg0 + theta
+        };
+      }
+
+      const cDot = (curvEnd - curvStart) / len;
+      const s0Spiral = curvStart / cDot;
+      const p0 = odrSpiral(s0Spiral, cDot);
+      const ps = odrSpiral(sAbs - s0 + s0Spiral, cDot);
+      const hdg = hdg0 - p0.t;
+      const dx = ps.x - p0.x;
+      const dy = ps.y - p0.y;
+
+      return {
+        x: Math.cos(hdg) * dx - Math.sin(hdg) * dy + x0,
+        y: Math.sin(hdg) * dx + Math.cos(hdg) * dy + y0,
+        s: sAbs,
+        hdg: ps.t + hdg0 - p0.t
+      };
+    }
+
+    function parseAttrNum(node, key, fallback = 0) {
+      const v = Number(node.getAttribute(key));
+      return Number.isFinite(v) ? v : fallback;
+    }
+
+    function sortLaneNodes(nodes, side) {
+      const dir = side === 'left' ? 1 : -1;
+      return [...nodes]
+        .map((laneNode) => ({
+          id: parseAttrNum(laneNode, 'id', 0),
+          type: laneNode.getAttribute('type') || 'driving',
+          widthRecords: [...laneNode.querySelectorAll(':scope > width')]
+            .map((widthNode) => ({
+              sOffset: parseAttrNum(widthNode, 'sOffset', 0),
+              a: parseAttrNum(widthNode, 'a', 0),
+              b: parseAttrNum(widthNode, 'b', 0),
+              c: parseAttrNum(widthNode, 'c', 0),
+              d: parseAttrNum(widthNode, 'd', 0)
+            }))
+            .sort((a, b) => a.sOffset - b.sOffset)
+        }))
+        .filter((lane) => side === 'left' ? lane.id > 0 : lane.id < 0)
+        .sort((a, b) => Math.abs(a.id) - Math.abs(b.id) || (a.id - b.id) * dir);
+    }
+
+    function makeAbsoluteCubicRecord(a, b, c, d, sOrigin) {
+      return {
+        sOffset: sOrigin,
+        a: a - b * sOrigin + c * sOrigin * sOrigin - d * sOrigin * sOrigin * sOrigin,
+        b: b - 2 * c * sOrigin + 3 * d * sOrigin * sOrigin,
+        c: c - 3 * d * sOrigin,
+        d
+      };
+    }
+
+    function getProfileRecord(records, sValue, extendStart = true) {
+      if (!records || !records.length) return null;
+      if (!extendStart && sValue < records[0].sOffset) return null;
+      let active = records[0];
+      for (let i = 1; i < records.length; i += 1) {
+        if (sValue >= records[i].sOffset) active = records[i];
+        else break;
+      }
+      return active;
+    }
+
+    function evaluateProfile(records, sValue, fallback = 0, extendStart = true) {
+      const active = getProfileRecord(records, sValue, extendStart);
+      if (!active) return fallback;
+      return active.a + active.b * sValue + active.c * sValue * sValue + active.d * sValue * sValue * sValue;
+    }
+
+    function negateProfile(records) {
+      return (records || []).map((record) => ({
+        sOffset: record.sOffset,
+        a: -record.a,
+        b: -record.b,
+        c: -record.c,
+        d: -record.d
+      }));
+    }
+
+    function addProfiles(baseRecords, otherRecords) {
+      if (!baseRecords || !baseRecords.length) return otherRecords ? [...otherRecords] : [];
+      if (!otherRecords || !otherRecords.length) return [...baseRecords];
+
+      const keys = [...new Set([
+        ...baseRecords.map((record) => record.sOffset),
+        ...otherRecords.map((record) => record.sOffset)
+      ])].sort((a, b) => a - b);
+
+      return keys.map((sOffset) => {
+        const left = getProfileRecord(baseRecords, sOffset, false);
+        const right = getProfileRecord(otherRecords, sOffset, false);
+        if (!left) return { ...right, sOffset };
+        if (!right) return { ...left, sOffset };
+        return {
+          sOffset,
+          a: left.a + right.a,
+          b: left.b + right.b,
+          c: left.c + right.c,
+          d: left.d + right.d
+        };
+      });
+    }
+
+    function parseLaneOffsetRecords(roadNode) {
+      const nodes = [...roadNode.querySelectorAll(':scope > lanes > laneOffset')];
+      if (!nodes.length) {
+        return [{ sOffset: 0, a: 0, b: 0, c: 0, d: 0 }];
+      }
+      return nodes
+        .map((node) => ({
+          ...makeAbsoluteCubicRecord(
+            parseAttrNum(node, 'a', 0),
+            parseAttrNum(node, 'b', 0),
+            parseAttrNum(node, 'c', 0),
+            parseAttrNum(node, 'd', 0),
+            parseAttrNum(node, 's', 0)
+          )
+        }))
+        .sort((a, b) => a.sOffset - b.sOffset);
+    }
+
+    function parseLaneSections(roadNode) {
+      const sections = [...roadNode.querySelectorAll(':scope > lanes > laneSection')]
+        .map((sectionNode) => {
+          const centerLane = sectionNode.querySelector(':scope > center > lane');
+          const sectionS = parseAttrNum(sectionNode, 's', 0);
+          const leftLanes = sortLaneNodes(sectionNode.querySelectorAll(':scope > left > lane'), 'left')
+            .map((lane) => ({
+              ...lane,
+              widthProfile: (lane.widthRecords.length ? lane.widthRecords : [{ sOffset: 0, a: 0, b: 0, c: 0, d: 0 }])
+                .map((record) => makeAbsoluteCubicRecord(record.a, record.b, record.c, record.d, sectionS + record.sOffset))
+            }));
+          const rightLanes = sortLaneNodes(sectionNode.querySelectorAll(':scope > right > lane'), 'right')
+            .map((lane) => ({
+              ...lane,
+              widthProfile: (lane.widthRecords.length ? lane.widthRecords : [{ sOffset: 0, a: 0, b: 0, c: 0, d: 0 }])
+                .map((record) => makeAbsoluteCubicRecord(record.a, record.b, record.c, record.d, sectionS + record.sOffset))
+            }));
+
+          return {
+            s: sectionS,
+            centerType: centerLane ? (centerLane.getAttribute('type') || 'none') : 'none',
+            leftLanes,
+            rightLanes
+          };
+        })
+        .sort((a, b) => a.s - b.s);
+
+      sections.forEach((section) => {
+        let leftAccum = [];
+        section.leftLanes = section.leftLanes.map((lane, idx) => {
+          const outerBorderProfile = idx === 0 ? lane.widthProfile : addProfiles(leftAccum, lane.widthProfile);
+          leftAccum = outerBorderProfile;
+          return { ...lane, outerBorderProfile };
+        });
+
+        let rightAccum = [];
+        section.rightLanes = section.rightLanes.map((lane, idx) => {
+          const negatedWidth = negateProfile(lane.widthProfile);
+          const outerBorderProfile = idx === 0 ? negatedWidth : addProfiles(rightAccum, negatedWidth);
+          rightAccum = outerBorderProfile;
+          return { ...lane, outerBorderProfile };
+        });
+      });
+
+      return sections;
+    }
+
+    function laneCountFromSections(laneSections, side) {
+      return laneSections.reduce((best, section) => {
+        const lanes = side === 'left' ? section.leftLanes : section.rightLanes;
+        return Math.max(best, lanes.length);
+      }, 0);
+    }
+
+    function countLane(sideNode) {
+      if (!sideNode) return 0;
+      return sideNode.querySelectorAll(':scope > lane').length;
+    }
+
+    function readLaneWidth(laneSectionNode) {
+      if (!laneSectionNode) return 3.5;
+      const lane = laneSectionNode.querySelector('left > lane, right > lane, center > lane');
+      if (!lane) return 3.5;
+      const widthNode = lane.querySelector('width');
+      if (!widthNode) return 3.5;
+      const a = Number(widthNode.getAttribute('a'));
+      return Number.isFinite(a) && a > 0 ? a : 3.5;
+    }
+
+    function getLaneSectionAtS(road, sValue) {
+      const sections = road.laneSections || [];
+      if (!sections.length) return null;
+      let active = sections[0];
+      for (let i = 1; i < sections.length; i += 1) {
+        if (sValue >= sections[i].s) active = sections[i];
+        else break;
+      }
+      return active;
+    }
+
+    function laneWidthAt(lane, sectionS, fallbackWidth) {
+      if (!lane) return Math.max(0, fallbackWidth || 0);
+      const width = evaluateProfile(lane.widthProfile, sectionS, fallbackWidth || 0, true);
+      return Math.max(0, width);
+    }
+
+    function getRoadProfileAtS(road, sValue) {
+      const laneOffset = evaluateProfile(road.laneOffsetRecords, sValue, 0, true);
+      const section = getLaneSectionAtS(road, sValue);
+      const fallbackLeftWidth = Number(road.leftLaneWidth || road.laneWidth || 3.5);
+      const fallbackRightWidth = Number(road.rightLaneWidth || road.laneWidth || 3.5);
+
+      if (!section) {
+        const leftLaneCount = Number(road.leftLaneCount || 0);
+        const rightLaneCount = Number(road.rightLaneCount || 0);
+        const leftOffsets = [laneOffset];
+        const rightOffsets = [laneOffset];
+        let leftBoundary = laneOffset;
+        let rightBoundary = laneOffset;
+
+        for (let i = 0; i < leftLaneCount; i += 1) {
+          leftBoundary += fallbackLeftWidth;
+          leftOffsets.push(leftBoundary);
+        }
+        for (let i = 0; i < rightLaneCount; i += 1) {
+          rightBoundary -= fallbackRightWidth;
+          rightOffsets.push(rightBoundary);
+        }
+
+        return {
+          laneOffset,
+          leftOffsets,
+          rightOffsets,
+          leftBoundary,
+          rightBoundary
+        };
+      }
+
+      const leftOffsets = [laneOffset];
+      const rightOffsets = [laneOffset];
+      let leftBoundary = laneOffset;
+      let rightBoundary = laneOffset;
+
+      section.leftLanes.forEach((lane) => {
+        leftBoundary = laneOffset + evaluateProfile(lane.outerBorderProfile, sValue, fallbackLeftWidth, true);
+        leftOffsets.push(leftBoundary);
+      });
+      section.rightLanes.forEach((lane) => {
+        rightBoundary = laneOffset + evaluateProfile(lane.outerBorderProfile, sValue, -fallbackRightWidth, true);
+        rightOffsets.push(rightBoundary);
+      });
+
+      return {
+        laneOffset,
+        leftOffsets,
+        rightOffsets,
+        leftBoundary,
+        rightBoundary
+      };
+    }
+
+    function sampleGeometry(g) {
+      const x = Number(g.x);
+      const y = Number(g.y);
+      const hdg = Number(g.hdg);
+      const len = Number(g.length);
+      if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(hdg) || !Number.isFinite(len) || len <= 0) {
+        return [];
+      }
+
+      if (g.type === 'arc' && Number.isFinite(g.curvature) && Math.abs(g.curvature) > 1e-9) {
+        const k = g.curvature;
+        const theta = len * k;
+        const r = 1 / k;
+        const cx = x - Math.sin(hdg) * r;
+        const cy = y + Math.cos(hdg) * r;
+        const alpha0 = Math.atan2(y - cy, x - cx);
+        const step = 0.01 / Math.abs(k);
+        const segments = Math.max(8, Math.ceil(len / step));
+        const pts = [];
+
+        for (let i = 0; i <= segments; i += 1) {
+          const t = i / segments;
+          const alpha = alpha0 + theta * t;
+          pts.push({
+            x: cx + r * Math.cos(alpha),
+            y: cy + r * Math.sin(alpha),
+            s: Number(g.s || 0) + len * t,
+            hdg: hdg + theta * t
+          });
+        }
+        return pts;
+      }
+
+      if (g.type === 'spiral') {
+        const curvStart = Number(g.curvStart || 0);
+        const curvEnd = Number(g.curvEnd || 0);
+        const maxCurv = Math.max(Math.abs(curvStart), Math.abs(curvEnd));
+        const step = maxCurv > 1e-9 ? Math.min(0.5, 0.01 / maxCurv) : Math.min(0.5, len);
+        const segments = Math.max(12, Math.ceil(len / Math.max(step, 1e-3)));
+        const pts = [];
+
+        for (let i = 0; i <= segments; i += 1) {
+          const sAbs = Number(g.s || 0) + (len * i) / segments;
+          pts.push(sampleSpiralPoint(g, sAbs));
+        }
+        return pts;
+      }
+
+      return [
+        { x, y, s: Number(g.s || 0), hdg },
+        { x: x + len * Math.cos(hdg), y: y + len * Math.sin(hdg), s: Number(g.s || 0) + len, hdg }
+      ];
+    }
+
+    function geometryToPoints(geometries) {
+      if (!geometries.length) return [];
+      const sorted = [...geometries].sort((a, b) => a.s - b.s);
+      const points = [];
+
+      for (let i = 0; i < sorted.length; i += 1) {
+        const g = sorted[i];
+        const samples = sampleGeometry(g);
+        for (const pt of samples) {
+          const last = points[points.length - 1];
+          if (!last || Math.hypot(last.x - pt.x, last.y - pt.y) > 1e-3) {
+            points.push(pt);
+          }
+        }
+      }
+      return points;
+    }
+
+    function applyHeaderFromXodr(xmlText) {
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(xmlText, 'application/xml');
+      const parserErr = doc.querySelector('parsererror');
+      if (parserErr) {
+        throw new Error('XODR/XML 解析失败，请检查文件格式');
+      }
+
+      const root = doc.querySelector('OpenDRIVE');
+      if (!root) {
+        throw new Error('不是有效的 OpenDRIVE 文件（缺少 OpenDRIVE 根节点）');
+      }
+      const header = root.querySelector(':scope > header');
+      if (header) {
+        $('h_name').value = header.getAttribute('name') || $('h_name').value;
+        $('h_vendor').value = header.getAttribute('vendor') || $('h_vendor').value;
+        if (header.hasAttribute('north')) $('h_north').value = header.getAttribute('north');
+        if (header.hasAttribute('south')) $('h_south').value = header.getAttribute('south');
+        if (header.hasAttribute('east')) $('h_east').value = header.getAttribute('east');
+        if (header.hasAttribute('west')) $('h_west').value = header.getAttribute('west');
+      }
+    }
+
+    function applyNativeRoads(parsedRoads) {
+      const normalizedRoads = (parsedRoads || []).map((r, idx) => ({
+        id: String(r.id ?? idx + 1),
+        junction: String(r.junction ?? '-1'),
+        leftLaneCount: Math.max(0, Number(r.leftLaneCount || 0)),
+        rightLaneCount: Math.max(0, Number(r.rightLaneCount || 0)),
+        laneWidth: Math.max(0.5, Number(r.laneWidth || 3.5)),
+        leftLaneWidth: Math.max(0.5, Number(r.leftLaneWidth || r.laneWidth || 3.5)),
+        rightLaneWidth: Math.max(0.5, Number(r.rightLaneWidth || r.laneWidth || 3.5)),
+        centerType: r.centerType || 'none',
+        predecessorType: r.predecessorType || 'road',
+        predecessorId: String(r.predecessorId ?? r.id ?? idx + 1),
+        successorType: r.successorType || 'road',
+        successorId: String(r.successorId ?? r.id ?? idx + 1),
+        laneSections: [],
+        laneOffsetRecords: [{ sOffset: 0, a: 0, b: 0, c: 0, d: 0 }],
+        points: Array.isArray(r.points) ? r.points.map((p) => ({ x: Number(p.x), y: Number(p.y), s: Number(p.s), hdg: Number(p.hdg) })) : [],
+        nativeLeftBoundary: Array.isArray(r.nativeLeftBoundary) ? r.nativeLeftBoundary.map((p) => ({ x: Number(p.x), y: Number(p.y) })) : [],
+        nativeRightBoundary: Array.isArray(r.nativeRightBoundary) ? r.nativeRightBoundary.map((p) => ({ x: Number(p.x), y: Number(p.y) })) : [],
+        nativeLaneBoundaries: Array.isArray(r.nativeLaneBoundaries) ? r.nativeLaneBoundaries : [],
+        length: Number.isFinite(Number(r.length)) ? Number(r.length) : polylineLength(r.points || [])
+      }));
+
+      roads.length = 0;
+      normalizedRoads.forEach((r) => roads.push(r));
+      drawingPoints = [];
+      selectedRoadIndex = roads.length ? 0 : -1;
+      fillRoadForm();
+      if (selectedRoadIndex >= 0) {
+        fillPopupForm();
+      }
+      refreshRoadList();
+      fitView();
+      render();
+      return normalizedRoads.length;
+    }
+
+    function scalePolylineToLength(points, targetLength) {
+      if (!Array.isArray(points) || points.length < 2) return points;
+      const current = polylineLength(points);
+      if (current <= 1e-6 || targetLength <= 1e-6) return points;
+      const ratio = targetLength / current;
+      const out = [{ x: points[0].x, y: points[0].y }];
+      for (let i = 1; i < points.length; i += 1) {
+        const p0 = points[i - 1];
+        const p1 = points[i];
+        const dx = p1.x - p0.x;
+        const dy = p1.y - p0.y;
+        const d = Math.hypot(dx, dy);
+        if (d <= 1e-6) {
+          out.push({ ...out[out.length - 1] });
+          continue;
+        }
+        const nd = d * ratio;
+        const prev = out[out.length - 1];
+        out.push({
+          x: prev.x + (dx / d) * nd,
+          y: prev.y + (dy / d) * nd
+        });
+      }
+      return out;
+    }
+
+    function screenToWorld(sx, sy) {
+      return { x: (sx - view.offsetX) / view.scale, y: (sy - view.offsetY) / view.scale };
+    }
+
+    function worldToScreen(x, y) {
+      return { x: x * view.scale + view.offsetX, y: y * view.scale + view.offsetY };
+    }
+
+    function distPointToSeg(p, a, b) {
+      const vx = b.x - a.x;
+      const vy = b.y - a.y;
+      const wx = p.x - a.x;
+      const wy = p.y - a.y;
+      const c1 = vx * wx + vy * wy;
+      if (c1 <= 0) return Math.hypot(p.x - a.x, p.y - a.y);
+      const c2 = vx * vx + vy * vy;
+      if (c2 <= c1) return Math.hypot(p.x - b.x, p.y - b.y);
+      const t = c1 / c2;
+      const px = a.x + t * vx;
+      const py = a.y + t * vy;
+      return Math.hypot(p.x - px, p.y - py);
+    }
+
+    function pickRoad(worldPoint) {
+      let best = { idx: -1, d: Infinity };
+      roads.forEach((r, idx) => {
+        if (!r.points || r.points.length < 2) return;
+        for (let i = 1; i < r.points.length; i += 1) {
+          const d = distPointToSeg(worldPoint, r.points[i - 1], r.points[i]);
+          if (d < best.d) best = { idx, d };
+        }
+      });
+      return best.d <= 10 / view.scale ? best.idx : -1;
+    }
+
+    function drawPolyline(points, color, width, dashed = false, showPoints = false) {
+      if (!points.length) return;
+      ctx.beginPath();
+      const p0 = worldToScreen(points[0].x, points[0].y);
+      ctx.moveTo(p0.x, p0.y);
+      for (let i = 1; i < points.length; i += 1) {
+        const p = worldToScreen(points[i].x, points[i].y);
+        ctx.lineTo(p.x, p.y);
+      }
+      ctx.strokeStyle = color;
+      ctx.lineWidth = width;
+      ctx.lineJoin = 'round';
+      ctx.lineCap = 'round';
+      ctx.setLineDash(dashed ? [10, 8] : []);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      if (showPoints) {
+        points.forEach((pt) => {
+          const p = worldToScreen(pt.x, pt.y);
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, 2.8, 0, Math.PI * 2);
+          ctx.fillStyle = color;
+          ctx.fill();
+        });
+      }
+    }
+
+    function pointNormal(sample, fallbackHeading = 0) {
+      const hdg = Number.isFinite(sample.hdg) ? sample.hdg : fallbackHeading;
+      return { nx: -Math.sin(hdg), ny: Math.cos(hdg) };
+    }
+
+    function offsetSamplePoint(sample, offsetWorld, fallbackHeading = 0) {
+      const { nx, ny } = pointNormal(sample, fallbackHeading);
+      return {
+        x: sample.x + nx * offsetWorld,
+        y: sample.y + ny * offsetWorld
+      };
+    }
+
+    function buildOffsetPath(road, offsetSelector) {
+      if (!road.points || road.points.length < 2) return [];
+      const out = [];
+
+      for (let i = 0; i < road.points.length; i += 1) {
+        const sample = road.points[i];
+        let fallbackHeading = 0;
+        if (!Number.isFinite(sample.hdg)) {
+          const prev = road.points[Math.max(0, i - 1)];
+          const next = road.points[Math.min(road.points.length - 1, i + 1)];
+          fallbackHeading = Math.atan2(next.y - prev.y, next.x - prev.x);
+        }
+        const profile = getRoadProfileAtS(road, Number(sample.s || 0));
+        out.push(offsetSamplePoint(sample, offsetSelector(profile), fallbackHeading));
+      }
+      return out;
+    }
+
+    function drawFilledBand(leftPath, rightPath, fillStyle) {
+      if (!leftPath.length || !rightPath.length) return;
+      ctx.beginPath();
+      const p0 = worldToScreen(leftPath[0].x, leftPath[0].y);
+      ctx.moveTo(p0.x, p0.y);
+      for (let i = 1; i < leftPath.length; i += 1) {
+        const p = worldToScreen(leftPath[i].x, leftPath[i].y);
+        ctx.lineTo(p.x, p.y);
+      }
+      for (let i = rightPath.length - 1; i >= 0; i -= 1) {
+        const p = worldToScreen(rightPath[i].x, rightPath[i].y);
+        ctx.lineTo(p.x, p.y);
+      }
+      ctx.closePath();
+      ctx.fillStyle = fillStyle;
+      ctx.fill();
+    }
+
+    function drawOffsetPolyline(points, offsetWorld, color, width, dashed = false) {
+      if (!points || points.length < 2) return;
+      const shifted = [];
+      for (let i = 0; i < points.length; i += 1) {
+        const p = points[i];
+        let nx = 0;
+        let ny = 0;
+        let count = 0;
+
+        if (i > 0) {
+          const prev = points[i - 1];
+          const dx = p.x - prev.x;
+          const dy = p.y - prev.y;
+          const d = Math.hypot(dx, dy);
+          if (d > 1e-6) {
+            nx += -dy / d;
+            ny += dx / d;
+            count += 1;
+          }
+        }
+        if (i < points.length - 1) {
+          const next = points[i + 1];
+          const dx = next.x - p.x;
+          const dy = next.y - p.y;
+          const d = Math.hypot(dx, dy);
+          if (d > 1e-6) {
+            nx += -dy / d;
+            ny += dx / d;
+            count += 1;
+          }
+        }
+
+        if (count === 0) {
+          shifted.push({ x: p.x, y: p.y });
+          continue;
+        }
+        const nLen = Math.hypot(nx, ny);
+        shifted.push({
+          x: p.x + (nx / nLen) * offsetWorld,
+          y: p.y + (ny / nLen) * offsetWorld
+        });
+      }
+      drawPolyline(shifted, color, width, dashed, false);
+    }
+
+    function drawRoadSurface(road, selected) {
+      if (!road.points || road.points.length < 2) return;
+      if (Array.isArray(road.nativeLeftBoundary) && road.nativeLeftBoundary.length > 1 &&
+          Array.isArray(road.nativeRightBoundary) && road.nativeRightBoundary.length > 1) {
+        drawFilledBand(road.nativeLeftBoundary, road.nativeRightBoundary, selected ? '#6b7280' : '#4b5563');
+        drawPolyline(road.nativeLeftBoundary, '#dce4ef', 1.6, false, false);
+        drawPolyline(road.nativeRightBoundary, '#dce4ef', 1.6, false, false);
+        (road.nativeLaneBoundaries || []).forEach((lane) => {
+          if (!lane || !Array.isArray(lane.points) || lane.points.length < 2) return;
+          drawPolyline(lane.points, '#eef3f9', 1, true, false);
+        });
+        drawPolyline(road.points, selected ? '#ffd089' : '#8fd8ff', 1.2, true, false);
+        return;
+      }
+      const leftBoundary = buildOffsetPath(road, (profile) => profile.leftBoundary);
+      const rightBoundary = buildOffsetPath(road, (profile) => profile.rightBoundary);
+      drawFilledBand(leftBoundary, rightBoundary, selected ? '#6b7280' : '#4b5563');
+
+      drawPolyline(leftBoundary, '#dce4ef', 1.6, false, false);
+      drawPolyline(rightBoundary, '#dce4ef', 1.6, false, false);
+
+      const parsedLeftCount = laneCountFromSections(road.laneSections || [], 'left');
+      const parsedRightCount = laneCountFromSections(road.laneSections || [], 'right');
+      const leftDividerCount = Math.max(0, (parsedLeftCount || Number(road.leftLaneCount || 0)) - 1);
+      const rightDividerCount = Math.max(0, (parsedRightCount || Number(road.rightLaneCount || 0)) - 1);
+
+      for (let i = 0; i < leftDividerCount; i += 1) {
+        const laneLine = buildOffsetPath(road, (profile) => {
+          const idx = Math.min(i + 1, profile.leftOffsets.length - 1);
+          return profile.leftOffsets[idx];
+        });
+        drawPolyline(laneLine, '#eef3f9', 1, true, false);
+      }
+
+      for (let i = 0; i < rightDividerCount; i += 1) {
+        const laneLine = buildOffsetPath(road, (profile) => {
+          const idx = Math.min(i + 1, profile.rightOffsets.length - 1);
+          return profile.rightOffsets[idx];
+        });
+        drawPolyline(laneLine, '#eef3f9', 1, true, false);
+      }
+
+      const centerRef = buildOffsetPath(road, (profile) => profile.laneOffset);
+      drawPolyline(centerRef, selected ? '#ffd089' : '#8fd8ff', 1.6, true, false);
+      drawLaneDirectionArrows(road);
+    }
+
+    function drawHandles() {
+      if (mode !== 'extend') return;
+      getAllHandles().forEach((h) => {
+        const p = worldToScreen(h.x, h.y);
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 5, 0, Math.PI * 2);
+        ctx.fillStyle = h.endpoint === 'start' ? '#6ad0ff' : '#ffd16a';
+        ctx.fill();
+        ctx.strokeStyle = '#0f141a';
+        ctx.lineWidth = 1.2;
+        ctx.stroke();
+      });
+    }
+
+    function render() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      if (bgImage) {
+        const p = worldToScreen(0, 0);
+        ctx.drawImage(bgImage, p.x, p.y, bgImage.width * view.scale, bgImage.height * view.scale);
+      }
+
+      roads.forEach((r, idx) => {
+        const sel = idx === selectedRoadIndex;
+        drawRoadSurface(r, sel);
+        if (r.points && r.points.length) {
+          const p = worldToScreen(r.points[0].x, r.points[0].y);
+          ctx.fillStyle = sel ? '#ffc08a' : '#b8ffe9';
+          ctx.font = '12px sans-serif';
+          ctx.fillText(`R${r.id}`, p.x + 7, p.y - 6);
+        }
+      });
+
+      if (drawingPoints.length) {
+        drawPolyline(drawingPoints, '#74b4ff', 2.2, true, true);
+      }
+      if (extendDraft) {
+        drawPolyline([extendDraft.anchor, extendDraft.hover], '#77f2c8', 2, true, false);
+      }
+      drawHandles();
+    }
+
+    function drawArrowAt(path, idx, forward, color) {
+      if (!path || path.length < 2) return;
+      const a = path[Math.max(0, idx - 1)];
+      const b = path[Math.min(path.length - 1, idx + 1)];
+      const dirX0 = b.x - a.x;
+      const dirY0 = b.y - a.y;
+      const dirLen = Math.hypot(dirX0, dirY0);
+      if (dirLen < 1e-6) return;
+      let dirX = dirX0 / dirLen;
+      let dirY = dirY0 / dirLen;
+      if (!forward) {
+        dirX = -dirX;
+        dirY = -dirY;
+      }
+      const nX = -dirY;
+      const nY = dirX;
+      const p = worldToScreen(path[idx].x, path[idx].y);
+      const size = 7;
+      const tail = { x: p.x - dirX * size, y: p.y - dirY * size };
+      const left = { x: tail.x + nX * 3.2, y: tail.y + nY * 3.2 };
+      const right = { x: tail.x - nX * 3.2, y: tail.y - nY * 3.2 };
+
+      ctx.beginPath();
+      ctx.moveTo(p.x, p.y);
+      ctx.lineTo(left.x, left.y);
+      ctx.lineTo(right.x, right.y);
+      ctx.closePath();
+      ctx.fillStyle = color;
+      ctx.fill();
+    }
+
+    function drawLaneDirectionArrows(road) {
+      if (!road.points || road.points.length < 2) return;
+      const rightCount = Number(road.rightLaneCount || 0);
+      const leftCount = Number(road.leftLaneCount || 0);
+
+      const rightPath = rightCount > 0
+        ? buildOffsetPath(road, (profile) => (profile.laneOffset + profile.rightBoundary) * 0.5)
+        : [];
+      const leftPath = leftCount > 0
+        ? buildOffsetPath(road, (profile) => (profile.laneOffset + profile.leftBoundary) * 0.5)
+        : [];
+
+      const drawArrowSeries = (path, forward, color) => {
+        if (!path || path.length < 6) return;
+        const step = Math.max(6, Math.floor(path.length / 8));
+        for (let i = step; i < path.length - 1; i += step) {
+          drawArrowAt(path, i, forward, color);
+        }
+      };
+
+      // OpenDRIVE 常见约定：右侧车道(-id)沿参考线方向，左侧车道(+id)反向
+      drawArrowSeries(rightPath, true, 'rgba(124, 240, 213, 0.92)');
+      drawArrowSeries(leftPath, false, 'rgba(255, 194, 124, 0.92)');
+    }
+
+    function resizeCanvas(keepWorldCenter = true) {
+      const rect = canvasWrap.getBoundingClientRect();
+      const newWidth = Math.max(300, Math.floor(rect.width));
+      const newHeight = Math.max(260, Math.floor(rect.height));
+      if (newWidth === canvas.width && newHeight === canvas.height) return;
+
+      const prevCenterWorld = keepWorldCenter
+        ? screenToWorld(canvas.width / 2, canvas.height / 2)
+        : { x: 0, y: 0 };
+
+      canvas.width = newWidth;
+      canvas.height = newHeight;
+
+      if (keepWorldCenter) {
+        view.offsetX = canvas.width / 2 - prevCenterWorld.x * view.scale;
+        view.offsetY = canvas.height / 2 - prevCenterWorld.y * view.scale;
+      }
+      render();
+    }
+
+    function fitView() {
+      if (bgImage) {
+        const sx = canvas.width / bgImage.width;
+        const sy = canvas.height / bgImage.height;
+        view.scale = Math.min(sx, sy);
+        view.offsetX = (canvas.width - bgImage.width * view.scale) / 2;
+        view.offsetY = (canvas.height - bgImage.height * view.scale) / 2;
+      } else if (roads.length) {
+        let minX = Infinity;
+        let minY = Infinity;
+        let maxX = -Infinity;
+        let maxY = -Infinity;
+        roads.forEach((r) => {
+          const leftBoundary = (Array.isArray(r.nativeLeftBoundary) && r.nativeLeftBoundary.length)
+            ? r.nativeLeftBoundary
+            : buildOffsetPath(r, (profile) => profile.leftBoundary);
+          const rightBoundary = (Array.isArray(r.nativeRightBoundary) && r.nativeRightBoundary.length)
+            ? r.nativeRightBoundary
+            : buildOffsetPath(r, (profile) => profile.rightBoundary);
+          const fitPoints = leftBoundary.length && rightBoundary.length
+            ? leftBoundary.concat(rightBoundary)
+            : (r.points || []);
+          fitPoints.forEach((p) => {
+            if (p.x < minX) minX = p.x;
+            if (p.y < minY) minY = p.y;
+            if (p.x > maxX) maxX = p.x;
+            if (p.y > maxY) maxY = p.y;
+          });
+        });
+
+        if (Number.isFinite(minX) && Number.isFinite(minY) && Number.isFinite(maxX) && Number.isFinite(maxY)) {
+          const w = Math.max(1, maxX - minX);
+          const h = Math.max(1, maxY - minY);
+          const margin = 40;
+          const sx = (canvas.width - margin * 2) / w;
+          const sy = (canvas.height - margin * 2) / h;
+          view.scale = Math.max(0.00001, Math.min(sx, sy));
+          view.offsetX = margin - minX * view.scale + (canvas.width - margin * 2 - w * view.scale) / 2;
+          view.offsetY = margin - minY * view.scale + (canvas.height - margin * 2 - h * view.scale) / 2;
+        }
+      } else {
+        view.scale = 1;
+        view.offsetX = 0;
+        view.offsetY = 0;
+      }
+      render();
+    }
+
+    function refreshRoadList() {
+      const box = $('road_list');
+      if (!roads.length) {
+        box.innerHTML = '<div style="color:#8c9bb1;padding:5px 6px;">暂无道路</div>';
+        return;
+      }
+      const linkedChildrenByRoadId = new Map();
+      roads.forEach((r) => {
+        const links = [];
+        roads.forEach((candidate) => {
+          if (candidate.id === r.id) return;
+          if (String(candidate.predecessorId || '') === String(r.id) || String(candidate.successorId || '') === String(r.id)) {
+            links.push(candidate.id);
+          }
+        });
+        linkedChildrenByRoadId.set(String(r.id), [...new Set(links)]);
+      });
+
+      box.innerHTML = roads.map((r, i) => {
+        const cls = i === selectedRoadIndex ? 'road-item sel' : 'road-item';
+        const children = linkedChildrenByRoadId.get(String(r.id)) || [];
+        const childrenText = children.length ? `关联小路: ${children.join(', ')}` : '关联小路: 无';
+        return `<div class="${cls}" data-idx="${i}">
+          <div>Road ${r.id} | len=${r.length.toFixed(2)} | pts=${r.points.length}</div>
+          <div class="meta">pred=${r.predecessorId || '-'} | succ=${r.successorId || '-'}</div>
+          <div class="children">${childrenText}</div>
+        </div>`;
+      }).join('');
+
+      box.querySelectorAll('.road-item').forEach((el) => {
+        el.onclick = () => {
+          selectedRoadIndex = Number(el.dataset.idx);
+          fillRoadForm();
+          fillPopupForm();
+          showRoadPopup(16, 16, true);
+          refreshRoadList();
+          render();
+        };
+      });
+    }
+
+    function defaultRoadFromPoints(points) {
+      const idx = nextRoadId();
+      const len = polylineLength(points);
+      return {
+        id: String(idx),
+        junction: '-1',
+        leftLaneCount: 1,
+        rightLaneCount: 1,
+        laneWidth: 3.5,
+        leftLaneWidth: 3.5,
+        rightLaneWidth: 3.5,
+        centerType: 'none',
+        predecessorType: 'road',
+        predecessorId: String(idx),
+        successorType: 'road',
+        successorId: String(idx),
+        points,
+        length: len
+      };
+    }
+
+    function nextRoadId() {
+      let maxId = 0;
+      roads.forEach((r) => {
+        const n = Number.parseInt(r.id, 10);
+        if (Number.isFinite(n)) maxId = Math.max(maxId, n);
+      });
+      return maxId + 1;
+    }
+
+    function clearNativeGeometry(road) {
+      road.nativeLeftBoundary = null;
+      road.nativeRightBoundary = null;
+      road.nativeLaneBoundaries = null;
+    }
+
+    function roadPoseAtEnd(road, atStart) {
+      const pts = road.points || [];
+      if (pts.length < 2) return null;
+      const idx = atStart ? 0 : pts.length - 1;
+      const p = pts[idx];
+
+      let hdg = Number(p.hdg);
+      if (!Number.isFinite(hdg)) {
+        if (atStart) {
+          const p1 = pts[1];
+          hdg = Math.atan2(p1.y - p.y, p1.x - p.x);
+        } else {
+          const p0 = pts[pts.length - 2];
+          hdg = Math.atan2(p.y - p0.y, p.x - p0.x);
+        }
+      }
+      return { x: p.x, y: p.y, hdg };
+    }
+
+    function sampleBezier(p0, p1, p2, p3, segments = 24) {
+      const pts = [];
+      for (let i = 0; i <= segments; i += 1) {
+        const t = i / segments;
+        const u = 1 - t;
+        const x = u * u * u * p0.x + 3 * u * u * t * p1.x + 3 * u * t * t * p2.x + t * t * t * p3.x;
+        const y = u * u * u * p0.y + 3 * u * u * t * p1.y + 3 * u * t * t * p2.y + t * t * t * p3.y;
+        pts.push({ x, y });
+      }
+      return pts;
+    }
+
+    function createRoadFromPoints(points) {
+      const id = String(nextRoadId());
+      return {
+        id,
+        junction: '-1',
+        leftLaneCount: 1,
+        rightLaneCount: 1,
+        laneWidth: 3.5,
+        leftLaneWidth: 3.5,
+        rightLaneWidth: 3.5,
+        centerType: 'none',
+        predecessorType: 'road',
+        predecessorId: id,
+        successorType: 'road',
+        successorId: id,
+        points,
+        length: polylineLength(points),
+        laneSections: [],
+        laneOffsetRecords: [{ sOffset: 0, a: 0, b: 0, c: 0, d: 0 }],
+        nativeLeftBoundary: null,
+        nativeRightBoundary: null,
+        nativeLaneBoundaries: null
+      };
+    }
+
+    function connectRoadsWithBezier(firstIdx, secondIdx) {
+      const first = roads[firstIdx];
+      const second = roads[secondIdx];
+      if (!first || !second || firstIdx === secondIdx) return false;
+
+      const p0 = roadPoseAtEnd(first, false);
+      const p3 = roadPoseAtEnd(second, true);
+      if (!p0 || !p3) return false;
+
+      const dx = p3.x - p0.x;
+      const dy = p3.y - p0.y;
+      const dist = Math.hypot(dx, dy);
+      const handleLen = Math.max(6, Math.min(80, dist * 0.35));
+      const p1 = { x: p0.x + Math.cos(p0.hdg) * handleLen, y: p0.y + Math.sin(p0.hdg) * handleLen };
+      const p2 = { x: p3.x - Math.cos(p3.hdg) * handleLen, y: p3.y - Math.sin(p3.hdg) * handleLen };
+      const bezierPoints = sampleBezier(p0, p1, p2, p3, Math.max(16, Math.ceil(dist / 2)));
+      const newRoad = createRoadFromPoints(bezierPoints);
+
+      newRoad.predecessorType = 'road';
+      newRoad.predecessorId = String(first.id);
+      newRoad.successorType = 'road';
+      newRoad.successorId = String(second.id);
+
+      first.successorType = 'road';
+      first.successorId = newRoad.id;
+      clearNativeGeometry(first);
+
+      second.predecessorType = 'road';
+      second.predecessorId = newRoad.id;
+      clearNativeGeometry(second);
+
+      roads.push(newRoad);
+      selectedRoadIndex = roads.length - 1;
+      fillRoadForm();
+      fillPopupForm();
+      refreshRoadList();
+      render();
+      return true;
+    }
+
+    function getAllHandles() {
+      const handles = [];
+      roads.forEach((road, roadIdx) => {
+        const start = roadPoseAtEnd(road, true);
+        const end = roadPoseAtEnd(road, false);
+        if (start) handles.push({ roadIdx, endpoint: 'start', ...start });
+        if (end) handles.push({ roadIdx, endpoint: 'end', ...end });
+      });
+      return handles;
+    }
+
+    function pickHandle(screenX, screenY) {
+      let best = null;
+      let bestDist = Infinity;
+      getAllHandles().forEach((h) => {
+        const p = worldToScreen(h.x, h.y);
+        const d = Math.hypot(screenX - p.x, screenY - p.y);
+        if (d < bestDist) {
+          bestDist = d;
+          best = h;
+        }
+      });
+      return bestDist <= 10 ? best : null;
+    }
+
+    function beginExtendFromHandle(handle) {
+      extendDraft = {
+        roadIdx: handle.roadIdx,
+        endpoint: handle.endpoint,
+        anchor: { x: handle.x, y: handle.y },
+        hover: { x: handle.x, y: handle.y }
+      };
+    }
+
+    function completeExtend(toPoint) {
+      if (!extendDraft) return;
+      const fromRoad = roads[extendDraft.roadIdx];
+      if (!fromRoad) {
+        extendDraft = null;
+        return;
+      }
+      const d = Math.hypot(toPoint.x - extendDraft.anchor.x, toPoint.y - extendDraft.anchor.y);
+      if (d < 0.5) {
+        extendDraft = null;
+        return;
+      }
+
+      const newRoad = createRoadFromPoints([
+        { x: extendDraft.anchor.x, y: extendDraft.anchor.y },
+        { x: toPoint.x, y: toPoint.y }
+      ]);
+
+      if (extendDraft.endpoint === 'end') {
+        fromRoad.successorType = 'road';
+        fromRoad.successorId = newRoad.id;
+        newRoad.predecessorType = 'road';
+        newRoad.predecessorId = String(fromRoad.id);
+      } else {
+        fromRoad.predecessorType = 'road';
+        fromRoad.predecessorId = newRoad.id;
+        newRoad.successorType = 'road';
+        newRoad.successorId = String(fromRoad.id);
+      }
+      clearNativeGeometry(fromRoad);
+      roads.push(newRoad);
+      selectedRoadIndex = roads.length - 1;
+      extendDraft = null;
+      fillRoadForm();
+      fillPopupForm();
+      refreshRoadList();
+      render();
+    }
+
+    function fillRoadForm() {
+      // 左侧“选中道路属性”面板已移除，保留此函数仅做兼容调用。
+      return;
+    }
+
+    function fillPopupForm() {
+      const r = roads[selectedRoadIndex];
+      if (!r) return;
+      $('p_id').value = r.id;
+      $('p_junction').value = r.junction;
+      $('p_length').value = r.length.toFixed(3);
+      $('p_left_lane_width').value = Number(r.leftLaneWidth || r.laneWidth || 3.5).toFixed(2);
+      $('p_right_lane_width').value = Number(r.rightLaneWidth || r.laneWidth || 3.5).toFixed(2);
+      $('p_left').value = r.leftLaneCount;
+      $('p_right').value = r.rightLaneCount;
+      $('p_center_type').value = r.centerType || 'none';
+      $('p_pred_type').value = r.predecessorType || 'road';
+      $('p_pred_id').value = r.predecessorId || '';
+      $('p_succ_type').value = r.successorType || 'road';
+      $('p_succ_id').value = r.successorId || '';
+      $('p_lane_mode').value = 'custom';
+    }
+
+    function applyLaneMode(mode) {
+      if (mode === 'oneway_single') {
+        $('p_left').value = 0;
+        $('p_right').value = 1;
+      } else if (mode === 'oneway_double') {
+        $('p_left').value = 0;
+        $('p_right').value = 2;
+      } else if (mode === 'twoway_two') {
+        $('p_left').value = 1;
+        $('p_right').value = 1;
+      } else if (mode === 'twoway_four') {
+        $('p_left').value = 2;
+        $('p_right').value = 2;
+      }
+    }
+
+    function showRoadPopup(x, y, pinned = false) {
+      if (selectedRoadIndex < 0) {
+        roadPopup.classList.remove('show');
+        return;
+      }
+      roadPopup.classList.add('show');
+      const margin = 10;
+      if (pinned) {
+        roadPopup.style.left = `${margin}px`;
+        roadPopup.style.top = `${margin}px`;
+        return;
+      }
+      const w = roadPopup.offsetWidth || 300;
+      const h = roadPopup.offsetHeight || 280;
+      const maxX = canvas.clientWidth - w - margin;
+      const maxY = canvas.clientHeight - h - margin;
+      const lx = Math.max(margin, Math.min(maxX, x + 12));
+      const ty = Math.max(margin, Math.min(maxY, y + 12));
+      roadPopup.style.left = `${lx}px`;
+      roadPopup.style.top = `${ty}px`;
+    }
+
+    function hideRoadPopup() {
+      roadPopup.classList.remove('show');
+    }
+
+    function applyPopupForm() {
+      const r = roads[selectedRoadIndex];
+      if (!r) return;
+      r.id = $('p_id').value.trim();
+      r.junction = $('p_junction').value.trim();
+      r.leftLaneCount = Math.max(0, Number($('p_left').value || 0));
+      r.rightLaneCount = Math.max(0, Number($('p_right').value || 0));
+      r.centerType = $('p_center_type').value;
+      r.predecessorType = $('p_pred_type').value;
+      r.predecessorId = $('p_pred_id').value.trim();
+      r.successorType = $('p_succ_type').value;
+      r.successorId = $('p_succ_id').value.trim();
+      r.leftLaneWidth = Math.max(0.5, Number($('p_left_lane_width').value || r.leftLaneWidth || r.laneWidth || 3.5));
+      r.rightLaneWidth = Math.max(0.5, Number($('p_right_lane_width').value || r.rightLaneWidth || r.laneWidth || 3.5));
+      r.laneWidth = (r.leftLaneWidth + r.rightLaneWidth) / 2;
+      const targetLength = Number($('p_length').value || r.length);
+      if (Number.isFinite(targetLength) && targetLength > 0 && Math.abs(targetLength - r.length) > 1e-6) {
+        r.points = scalePolylineToLength(r.points, targetLength);
+      }
+      r.nativeLeftBoundary = null;
+      r.nativeRightBoundary = null;
+      r.nativeLaneBoundaries = null;
+      r.length = polylineLength(r.points);
+      fillRoadForm();
+      fillPopupForm();
+      refreshRoadList();
+      render();
+    }
+
+    function currentSpec() {
+      return {
+        header: {
+          name: $('h_name').value,
+          vendor: $('h_vendor').value,
+          north: Number($('h_north').value),
+          south: Number($('h_south').value),
+          east: Number($('h_east').value),
+          west: Number($('h_west').value)
+        },
+        roads: roads.map((r) => ({ ...r, length: polylineLength(r.points) }))
+      };
+    }
+
+    async function postJson(url, payload) {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (!res.ok) throw new Error(await res.text());
+      return res.json();
+    }
+
+    function setCheckResult(result) {
+      $('check_summary').innerHTML = `error: <b class="err">${result.errorCount}</b> | warning: <b class="warn">${result.warningCount}</b> | status: <b class="${result.ok ? 'ok' : 'err'}">${result.ok ? 'PASS' : 'FAIL'}</b>`;
+      const lines = [];
+      if (result.errors.length) {
+        lines.push('<div class="err">[ERROR]</div>');
+        result.errors.forEach((e) => lines.push(`<div class="err">${e}</div>`));
+      }
+      if (result.warnings.length) {
+        lines.push('<div class="warn" style="margin-top:6px">[WARNING]</div>');
+        result.warnings.forEach((w) => lines.push(`<div class="warn">${w}</div>`));
+      }
+      if (!lines.length) lines.push('<div class="ok">No error/warn message.</div>');
+      $('check_log').innerHTML = lines.join('');
+    }
+
+    function setMode(nextMode) {
+      mode = nextMode;
+      $('btn_mode_draw').classList.toggle('active', mode === 'draw');
+      $('btn_mode_select').classList.toggle('active', mode === 'select');
+      $('btn_mode_connect').classList.toggle('active', mode === 'connect');
+      $('btn_mode_extend').classList.toggle('active', mode === 'extend');
+      connectSelection = [];
+      extendDraft = null;
+      render();
+    }
+
+    $('bg_file').addEventListener('change', (e) => {
+      const file = e.target.files && e.target.files[0];
+      if (!file) return;
+      const url = URL.createObjectURL(file);
+      const img = new Image();
+      img.onload = () => {
+        bgImage = img;
+        fitView();
+        URL.revokeObjectURL(url);
+      };
+      img.src = url;
+    });
+
+    $('btn_import_xodr').onclick = async () => {
+      const file = $('xodr_file').files && $('xodr_file').files[0];
+      if (!file) {
+        $('check_log').innerHTML = '<div class=\"warn\">请先选择 .xodr 文件</div>';
+        return;
+      }
+      try {
+        const text = await file.text();
+        applyHeaderFromXodr(text);
+        const payload = await postJson('/api/import-xodr-native', { xml: text, eps: 0.2 });
+        const n = applyNativeRoads(payload.roads || []);
+        $('check_log').innerHTML = `<div class=\"ok\">已导入 ${n} 条道路</div>`;
+      } catch (err) {
+        $('check_log').innerHTML = `<div class=\"err\">导入失败：${String(err.message || err)}</div>`;
+      }
+    };
+
+    canvas.addEventListener('click', (e) => {
+      if (view.panning || view.spaceDown) return;
+      const rect = canvas.getBoundingClientRect();
+      const sx = e.clientX - rect.left;
+      const sy = e.clientY - rect.top;
+      const p = screenToWorld(sx, sy);
+
+      if (mode === 'draw') {
+        drawingPoints.push({ x: p.x, y: p.y });
+        render();
+        return;
+      }
+
+      if (mode === 'select') {
+        selectedRoadIndex = pickRoad(p);
+        fillRoadForm();
+        if (selectedRoadIndex >= 0) {
+          fillPopupForm();
+          showRoadPopup(e.clientX - rect.left, e.clientY - rect.top, false);
+        } else {
+          hideRoadPopup();
+        }
+        refreshRoadList();
+        render();
+        return;
+      }
+
+      if (mode === 'connect') {
+        const idx = pickRoad(p);
+        if (idx < 0) return;
+        if (!connectSelection.length) {
+          connectSelection = [idx];
+          selectedRoadIndex = idx;
+          refreshRoadList();
+          render();
+          return;
+        }
+        if (connectSelection[0] === idx) {
+          connectSelection = [];
+          render();
+          return;
+        }
+        const ok = connectRoadsWithBezier(connectSelection[0], idx);
+        connectSelection = [];
+        if (!ok) {
+          $('check_log').innerHTML = '<div class="err">两条道路连接失败，请检查端点数据</div>';
+        } else {
+          $('check_log').innerHTML = '<div class="ok">已自动生成贝塞尔连接路并更新拓扑</div>';
+        }
+        return;
+      }
+
+      if (mode === 'extend') {
+        if (!extendDraft) {
+          const handle = pickHandle(sx, sy);
+          if (!handle) return;
+          beginExtendFromHandle(handle);
+          selectedRoadIndex = handle.roadIdx;
+          refreshRoadList();
+          render();
+          return;
+        }
+        completeExtend(p);
+        $('check_log').innerHTML = '<div class="ok">已生成延伸道路并自动更新连接关系</div>';
+      }
+    });
+
+    canvas.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      const rect = canvas.getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      const my = e.clientY - rect.top;
+      const before = screenToWorld(mx, my);
+      const k = e.deltaY < 0 ? 1.1 : 0.9;
+      view.scale = Math.max(0.1, Math.min(20, view.scale * k));
+      const after = worldToScreen(before.x, before.y);
+      view.offsetX += mx - after.x;
+      view.offsetY += my - after.y;
+      render();
+    }, { passive: false });
+
+    canvas.addEventListener('mousedown', (e) => {
+      if (!view.spaceDown) return;
+      view.panning = true;
+      view.panStartX = e.clientX;
+      view.panStartY = e.clientY;
+      view.baseOffsetX = view.offsetX;
+      view.baseOffsetY = view.offsetY;
+    });
+
+    window.addEventListener('mousemove', (e) => {
+      if (!view.panning) return;
+      view.offsetX = view.baseOffsetX + (e.clientX - view.panStartX);
+      view.offsetY = view.baseOffsetY + (e.clientY - view.panStartY);
+      render();
+    });
+    window.addEventListener('mousemove', (e) => {
+      if (!extendDraft || mode !== 'extend') return;
+      const rect = canvas.getBoundingClientRect();
+      extendDraft.hover = screenToWorld(e.clientX - rect.left, e.clientY - rect.top);
+      render();
+    });
+
+    window.addEventListener('mouseup', () => { view.panning = false; });
+    window.addEventListener('keydown', (e) => { if (e.code === 'Space') view.spaceDown = true; });
+    window.addEventListener('keyup', (e) => { if (e.code === 'Space') view.spaceDown = false; });
+
+    $('btn_mode_draw').onclick = () => setMode('draw');
+    $('btn_mode_select').onclick = () => setMode('select');
+    $('btn_mode_connect').onclick = () => setMode('connect');
+    $('btn_mode_extend').onclick = () => setMode('extend');
+
+    $('btn_finish').onclick = () => {
+      if (drawingPoints.length < 2) return;
+      const road = defaultRoadFromPoints(drawingPoints.slice());
+      roads.push(road);
+      selectedRoadIndex = roads.length - 1;
+      drawingPoints = [];
+      fillRoadForm();
+      refreshRoadList();
+      render();
+    };
+
+    $('btn_undo').onclick = () => {
+      if (drawingPoints.length) {
+        drawingPoints.pop();
+        render();
+      }
+    };
+
+    $('btn_delete').onclick = () => {
+      if (selectedRoadIndex < 0) return;
+      roads.splice(selectedRoadIndex, 1);
+      selectedRoadIndex = -1;
+      fillRoadForm();
+      refreshRoadList();
+      render();
+    };
+
+    $('btn_fit').onclick = fitView;
+    const btnApply = $('btn_apply');
+    if (btnApply) btnApply.onclick = applyRoadForm;
+    $('btn_popup_apply').onclick = applyPopupForm;
+    $('btn_popup_close').onclick = hideRoadPopup;
+    $('p_lane_mode').onchange = () => applyLaneMode($('p_lane_mode').value);
+
+    $('btn_validate').onclick = async () => {
+      try {
+        const result = await postJson('/api/validate', currentSpec());
+        setCheckResult(result);
+      } catch (err) {
+        $('check_log').textContent = String(err.message || err);
+      }
+    };
+
+    $('btn_gen').onclick = async () => {
+      try {
+        const { xodr } = await postJson('/api/generate-xodr', currentSpec());
+        lastXodr = xodr;
+        $('xodr_text').value = xodr;
+      } catch (err) {
+        $('xodr_text').value = String(err.message || err);
+      }
+    };
+
+    $('btn_download').onclick = () => {
+      const text = $('xodr_text').value || lastXodr;
+      if (!text) return;
+      const blob = new Blob([text], { type: 'application/xml;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${$('h_name').value || 'map'}.xodr`;
+      a.click();
+      URL.revokeObjectURL(url);
+    };
+
+    const resizeObserver = new ResizeObserver(() => resizeCanvas(true));
+    resizeObserver.observe(canvasWrap);
+    window.addEventListener('resize', () => resizeCanvas(true));
+
+    resizeCanvas(false);
+    fitView();
+    fillRoadForm();
+    refreshRoadList();
+    render();
+  })();
+  </script>
+</body>
+</html>
