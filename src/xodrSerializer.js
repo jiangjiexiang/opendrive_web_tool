@@ -19,6 +19,34 @@ function laneXml(lane, laneWidth) {
   ].join('\n');
 }
 
+function num(v, fallback = 0) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function normalizeGeometry(rawGeometry) {
+  const normalized = [];
+  let s = 0;
+  for (const g of rawGeometry || []) {
+    const length = num(g.length, 0);
+    if (length <= 1e-8) continue;
+    const roundedLength = Number(length.toFixed(6));
+    normalized.push({
+      s: Number(s.toFixed(6)),
+      x: num(g.x, 0),
+      y: num(g.y, 0),
+      hdg: num(g.hdg, 0),
+      length: roundedLength,
+      type: g.type || 'line'
+    });
+    s += roundedLength;
+  }
+  return {
+    geometry: normalized,
+    totalLength: Number(s.toFixed(6))
+  };
+}
+
 function lanesBlockXml(road) {
   const lanes = buildLanes(road.leftLaneCount, road.rightLaneCount, road.centerType);
   const laneWidth = Number(road.laneWidth || 3.5);
@@ -46,9 +74,10 @@ function lanesBlockXml(road) {
 }
 
 function geometryXml(road) {
-  const geometry = Array.isArray(road.geometry) && road.geometry.length
+  const sourceGeometry = Array.isArray(road.geometry) && road.geometry.length
     ? road.geometry
     : buildGeometryFromPoints(road.points);
+  const { geometry } = normalizeGeometry(sourceGeometry);
 
   if (!geometry.length) {
     const x = Number(road.x || 0);
@@ -63,7 +92,7 @@ function geometryXml(road) {
   }
 
   return geometry.map((g) => [
-    `      <geometry s="${Number(g.s).toFixed(3)}" x="${Number(g.x).toFixed(3)}" y="${Number(g.y).toFixed(3)}" hdg="${Number(g.hdg).toFixed(6)}" length="${Number(g.length).toFixed(3)}">`,
+    `      <geometry s="${Number(g.s).toFixed(6)}" x="${Number(g.x).toFixed(6)}" y="${Number(g.y).toFixed(6)}" hdg="${Number(g.hdg).toFixed(6)}" length="${Number(g.length).toFixed(6)}">`,
     '        <line/>',
     '      </geometry>'
   ].join('\n')).join('\n');
@@ -71,9 +100,19 @@ function geometryXml(road) {
 
 function roadXml(rawRoad) {
   const road = { ...rawRoad };
+  const sourceGeometry = Array.isArray(road.geometry) && road.geometry.length
+    ? road.geometry
+    : buildGeometryFromPoints(road.points);
+  const normalized = normalizeGeometry(sourceGeometry);
+  if (normalized.geometry.length) {
+    road.geometry = normalized.geometry;
+    road.length = normalized.totalLength;
+  }
   if (Array.isArray(road.points) && road.points.length >= 2) {
-    road.length = Number(polylineLength(road.points).toFixed(3));
-    road.geometry = buildGeometryFromPoints(road.points);
+    if (!normalized.geometry.length) {
+      road.length = Number(polylineLength(road.points).toFixed(6));
+      road.geometry = buildGeometryFromPoints(road.points);
+    }
     road.x = road.points[0].x;
     road.y = road.points[0].y;
     road.hdg = road.geometry[0]?.hdg || 0;
@@ -84,7 +123,7 @@ function roadXml(rawRoad) {
   const length = Number(road.length || 1);
 
   return [
-    `  <road name="road_${esc(rid)}" length="${length.toFixed(3)}" id="${esc(rid)}" junction="${esc(junction)}">`,
+    `  <road name="road_${esc(rid)}" length="${length.toFixed(6)}" id="${esc(rid)}" junction="${esc(junction)}">`,
     '    <link>',
     `      <predecessor elementType="${esc(road.predecessorType || 'road')}" elementId="${esc(road.predecessorId ?? rid)}" contactPoint="end"/>`,
     `      <successor elementType="${esc(road.successorType || 'road')}" elementId="${esc(road.successorId ?? rid)}" contactPoint="start"/>`,

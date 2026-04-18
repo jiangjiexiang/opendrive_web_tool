@@ -335,6 +335,20 @@
         box-shadow: -10px 0 24px rgba(0, 0, 0, 0.35);
       }
     }
+
+    body.embed .app {
+      grid-template-rows: 1fr;
+    }
+
+    body.embed .topbar,
+    body.embed .left-rail,
+    body.embed .right-panel {
+      display: none;
+    }
+
+    body.embed .workspace {
+      grid-template-columns: 1fr;
+    }
   </style>
 </head>
 <body>
@@ -460,11 +474,14 @@
     const ctx = canvas.getContext('2d');
     const canvasWrap = canvas.parentElement;
     const roadPopup = $('road_popup');
+    const embedMode = new URLSearchParams(window.location.search).get('embed') === '1';
+    if (embedMode) document.body.classList.add('embed');
 
     const roads = [];
     let selectedRoadIndex = -1;
     let drawingPoints = [];
     let lastXodr = '';
+    let lastCheckResult = null;
     let connectSelection = [];
     let extendDraft = null;
 
@@ -491,6 +508,265 @@
     const SPIRAL_FD = [7.515863983533789e-1, 1.1688892585919138e-1, 6.440515265088586e-3, 1.5593440916415303e-4, 1.8462756734893054e-6, 1.1269922476399903e-8, 3.601400295893714e-11, 5.887545336215784e-14, 4.520014340741297e-17, 1.2544323709001126e-20];
     const SPIRAL_GN = [5.044420736433833e-1, 1.9710283352552342e-1, 1.8764858409257524e-2, 6.840793809153931e-4, 1.1513882611188428e-5, 9.828524436884222e-8, 4.4534441586175015e-10, 1.0826804113902087e-12, 1.375554606332618e-15, 8.363544356306774e-19, 1.8695871016278323e-22];
     const SPIRAL_GD = [1.4749575992512833, 3.3774898912001997e-1, 2.536037414203388e-2, 8.146791071843062e-4, 1.2754507566772912e-5, 1.0431458965757199e-7, 4.606807281465204e-10, 1.1027321506624026e-12, 1.3879653125957886e-15, 8.391588162831187e-19, 1.8695871016278323e-22];
+
+    function buildChildrenMap() {
+      const linkedChildrenByRoadId = new Map();
+      roads.forEach((r) => {
+        const links = [];
+        roads.forEach((candidate) => {
+          if (candidate.id === r.id) return;
+          if (String(candidate.predecessorId || '') === String(r.id) || String(candidate.successorId || '') === String(r.id)) {
+            links.push(candidate.id);
+          }
+        });
+        linkedChildrenByRoadId.set(String(r.id), [...new Set(links)]);
+      });
+      return linkedChildrenByRoadId;
+    }
+
+    function bridgeSnapshot() {
+      const childrenMap = buildChildrenMap();
+      return {
+        mode,
+        selectedRoadIndex,
+        roadCount: roads.length,
+        header: {
+          name: $('h_name').value,
+          vendor: $('h_vendor').value,
+          north: Number($('h_north').value),
+          south: Number($('h_south').value),
+          east: Number($('h_east').value),
+          west: Number($('h_west').value)
+        },
+        xodrText: $('xodr_text').value || lastXodr || '',
+        checkResult: lastCheckResult,
+        roads: roads.map((r, i) => ({
+          index: i,
+          id: String(r.id ?? ''),
+          junction: String(r.junction ?? '-1'),
+          length: Number(r.length || polylineLength(r.points || [])),
+          pointsCount: Array.isArray(r.points) ? r.points.length : 0,
+          leftLaneCount: Number(r.leftLaneCount || 0),
+          rightLaneCount: Number(r.rightLaneCount || 0),
+          leftLaneWidth: Number(r.leftLaneWidth || r.laneWidth || 3.5),
+          rightLaneWidth: Number(r.rightLaneWidth || r.laneWidth || 3.5),
+          centerType: r.centerType || 'none',
+          predecessorType: r.predecessorType || 'road',
+          predecessorId: String(r.predecessorId ?? ''),
+          successorType: r.successorType || 'road',
+          successorId: String(r.successorId ?? ''),
+          children: childrenMap.get(String(r.id)) || []
+        }))
+      };
+    }
+
+    function emitActionResult(action, ok, data = {}) {
+      if (!window.parent || window.parent === window) return;
+      window.parent.postMessage({
+        source: 'odr-legacy',
+        type: 'action_result',
+        action,
+        ok,
+        ...data
+      }, '*');
+    }
+
+    function emitBridgeState(reason = 'update') {
+      if (!window.parent || window.parent === window) return;
+      window.parent.postMessage({
+        source: 'odr-legacy',
+        type: 'state',
+        reason,
+        payload: bridgeSnapshot()
+      }, '*');
+    }
+
+    window.addEventListener('message', async (event) => {
+      const data = event.data || {};
+      if (data.source !== 'odr-vue-shell') return;
+      if (data.type === 'get_state') {
+        emitBridgeState('requested');
+        return;
+      }
+      if (data.type === 'set_mode') {
+        const m = data.payload && data.payload.mode;
+        if (m === 'draw' || m === 'select' || m === 'connect' || m === 'extend') {
+          setMode(m);
+        }
+        return;
+      }
+      if (data.type === 'select_road') {
+        const idx = Number(data.payload && data.payload.index);
+        selectedRoadIndex = Number.isFinite(idx) ? Math.max(-1, Math.min(roads.length - 1, idx)) : -1;
+        fillRoadForm();
+        if (selectedRoadIndex >= 0) {
+          fillPopupForm();
+          if (!(data.payload && data.payload.suppressPopup)) {
+            showRoadPopup(16, 16, true);
+          }
+        } else {
+          hideRoadPopup();
+        }
+        refreshRoadList();
+        render();
+        emitBridgeState('selected');
+        return;
+      }
+      if (data.type === 'set_header') {
+        const values = data.payload || {};
+        if (typeof values.name === 'string') $('h_name').value = values.name;
+        if (typeof values.vendor === 'string') $('h_vendor').value = values.vendor;
+        if (Number.isFinite(Number(values.north))) $('h_north').value = String(values.north);
+        if (Number.isFinite(Number(values.south))) $('h_south').value = String(values.south);
+        if (Number.isFinite(Number(values.east))) $('h_east').value = String(values.east);
+        if (Number.isFinite(Number(values.west))) $('h_west').value = String(values.west);
+        emitBridgeState('header');
+        return;
+      }
+      if (data.type === 'apply_selected_road') {
+        const r = roads[selectedRoadIndex];
+        if (!r) {
+          emitActionResult('apply_selected_road', false, { error: 'no selected road' });
+          return;
+        }
+        const values = data.payload || {};
+        r.id = String(values.id ?? r.id).trim();
+        r.junction = String(values.junction ?? r.junction).trim();
+        r.leftLaneCount = Math.max(0, Number.isFinite(Number(values.leftLaneCount)) ? Number(values.leftLaneCount) : Number(r.leftLaneCount || 0));
+        r.rightLaneCount = Math.max(0, Number.isFinite(Number(values.rightLaneCount)) ? Number(values.rightLaneCount) : Number(r.rightLaneCount || 0));
+        r.centerType = String(values.centerType ?? r.centerType ?? 'none');
+        r.predecessorType = String(values.predecessorType ?? r.predecessorType ?? 'road');
+        r.predecessorId = String(values.predecessorId ?? r.predecessorId ?? '').trim();
+        r.successorType = String(values.successorType ?? r.successorType ?? 'road');
+        r.successorId = String(values.successorId ?? r.successorId ?? '').trim();
+        r.leftLaneWidth = Math.max(0.5, Number.isFinite(Number(values.leftLaneWidth)) ? Number(values.leftLaneWidth) : Number(r.leftLaneWidth || r.laneWidth || 3.5));
+        r.rightLaneWidth = Math.max(0.5, Number.isFinite(Number(values.rightLaneWidth)) ? Number(values.rightLaneWidth) : Number(r.rightLaneWidth || r.laneWidth || 3.5));
+        r.laneWidth = (r.leftLaneWidth + r.rightLaneWidth) / 2;
+        const targetLength = Number(values.length);
+        if (Number.isFinite(targetLength) && targetLength > 0 && Math.abs(targetLength - r.length) > 1e-6) {
+          r.points = scalePolylineToLength(r.points, targetLength);
+        }
+        r.nativeLeftBoundary = null;
+        r.nativeRightBoundary = null;
+        r.nativeLaneBoundaries = null;
+        r.length = polylineLength(r.points);
+        fillPopupForm();
+        refreshRoadList();
+        render();
+        emitActionResult('apply_selected_road', true);
+        return;
+      }
+      if (data.type === 'import_xodr') {
+        try {
+          const payload = data.payload || {};
+          const xmlText = String(payload.xml || '');
+          if (!xmlText.trim()) throw new Error('xml is required');
+          applyHeaderFromXodr(xmlText);
+          const parsed = await postJson('/api/import-xodr-native', { xml: xmlText, eps: Number(payload.eps) || 0.2 });
+          const n = applyNativeRoads(parsed.roads || []);
+          $('check_log').innerHTML = `<div class="ok">已导入 ${n} 条道路</div>`;
+          emitActionResult('import_xodr', true, { importedRoads: n });
+        } catch (err) {
+          emitActionResult('import_xodr', false, { error: String(err.message || err) });
+        }
+        return;
+      }
+      if (data.type === 'set_bg_image') {
+        try {
+          const dataUrl = String((data.payload || {}).dataUrl || '');
+          if (!dataUrl) throw new Error('dataUrl is required');
+          await new Promise((resolve, reject) => {
+            const img = new Image();
+            img.onload = () => {
+              bgImage = img;
+              fitView();
+              resolve();
+            };
+            img.onerror = () => reject(new Error('底图加载失败'));
+            img.src = dataUrl;
+          });
+          emitActionResult('set_bg_image', true);
+        } catch (err) {
+          emitActionResult('set_bg_image', false, { error: String(err.message || err) });
+        }
+        return;
+      }
+      if (data.type === 'invoke') {
+        const action = String((data.payload || {}).action || '');
+        try {
+          if (action === 'finish') {
+            if (drawingPoints.length >= 2) {
+              const road = defaultRoadFromPoints(drawingPoints.slice());
+              roads.push(road);
+              selectedRoadIndex = roads.length - 1;
+              drawingPoints = [];
+              fillRoadForm();
+              refreshRoadList();
+              render();
+            }
+            emitActionResult('finish', true);
+            return;
+          }
+          if (action === 'undo') {
+            if (drawingPoints.length) {
+              drawingPoints.pop();
+              render();
+            }
+            emitActionResult('undo', true);
+            return;
+          }
+          if (action === 'delete') {
+            if (selectedRoadIndex >= 0) {
+              roads.splice(selectedRoadIndex, 1);
+              selectedRoadIndex = -1;
+              fillRoadForm();
+              refreshRoadList();
+              render();
+            }
+            emitActionResult('delete', true);
+            return;
+          }
+          if (action === 'fit') {
+            fitView();
+            emitActionResult('fit', true);
+            return;
+          }
+          if (action === 'validate') {
+            const result = await postJson('/api/validate', currentSpec());
+            setCheckResult(result);
+            emitActionResult('validate', true, { result });
+            return;
+          }
+          if (action === 'generate') {
+            const { xodr } = await postJson('/api/generate-xodr', currentSpec());
+            lastXodr = xodr;
+            $('xodr_text').value = xodr;
+            emitBridgeState('xodr');
+            emitActionResult('generate', true, { xodr });
+            return;
+          }
+          if (action === 'download') {
+            const text = $('xodr_text').value || lastXodr;
+            if (!text) {
+              emitActionResult('download', false, { error: 'no xodr text' });
+              return;
+            }
+            const blob = new Blob([text], { type: 'application/xml;charset=utf-8' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `${$('h_name').value || 'map'}.xodr`;
+            a.click();
+            URL.revokeObjectURL(url);
+            emitActionResult('download', true);
+            return;
+          }
+          emitActionResult(action || 'invoke', false, { error: 'unknown action' });
+        } catch (err) {
+          emitActionResult(action || 'invoke', false, { error: String(err.message || err) });
+        }
+      }
+    });
 
     function polylineLength(points) {
       let total = 0;
@@ -1246,6 +1522,32 @@
       });
     }
 
+    function drawDraftRoadPreview() {
+      if (!drawingPoints.length) return;
+      if (drawingPoints.length === 1) {
+        const p = worldToScreen(drawingPoints[0].x, drawingPoints[0].y);
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 4.5, 0, Math.PI * 2);
+        ctx.fillStyle = '#88d7ff';
+        ctx.fill();
+        return;
+      }
+      const source = roads[selectedRoadIndex] || {};
+      const draftRoad = {
+        points: drawingPoints,
+        leftLaneCount: Number(source.leftLaneCount || 1),
+        rightLaneCount: Number(source.rightLaneCount || 1),
+        laneWidth: Number(source.laneWidth || 3.5),
+        leftLaneWidth: Number(source.leftLaneWidth || source.laneWidth || 3.5),
+        rightLaneWidth: Number(source.rightLaneWidth || source.laneWidth || 3.5),
+        laneSections: [],
+        laneOffsetRecords: [{ sOffset: 0, a: 0, b: 0, c: 0, d: 0 }]
+      };
+      drawRoadSurface(draftRoad, true);
+      drawLaneDirectionArrows(draftRoad);
+      drawPolyline(drawingPoints, '#9be7ff', 1.2, true, true);
+    }
+
     function render() {
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
@@ -1266,9 +1568,7 @@
         }
       });
 
-      if (drawingPoints.length) {
-        drawPolyline(drawingPoints, '#74b4ff', 2.2, true, true);
-      }
+      drawDraftRoadPreview();
       if (extendDraft) {
         drawPolyline([extendDraft.anchor, extendDraft.hover], '#77f2c8', 2, true, false);
       }
@@ -1418,19 +1718,10 @@
       const box = $('road_list');
       if (!roads.length) {
         box.innerHTML = '<div style="color:#8c9bb1;padding:5px 6px;">暂无道路</div>';
+        emitBridgeState('road-list');
         return;
       }
-      const linkedChildrenByRoadId = new Map();
-      roads.forEach((r) => {
-        const links = [];
-        roads.forEach((candidate) => {
-          if (candidate.id === r.id) return;
-          if (String(candidate.predecessorId || '') === String(r.id) || String(candidate.successorId || '') === String(r.id)) {
-            links.push(candidate.id);
-          }
-        });
-        linkedChildrenByRoadId.set(String(r.id), [...new Set(links)]);
-      });
+      const linkedChildrenByRoadId = buildChildrenMap();
 
       box.innerHTML = roads.map((r, i) => {
         const cls = i === selectedRoadIndex ? 'road-item sel' : 'road-item';
@@ -1453,6 +1744,7 @@
           render();
         };
       });
+      emitBridgeState('road-list');
     }
 
     function defaultRoadFromPoints(points) {
@@ -1779,6 +2071,7 @@
     }
 
     function setCheckResult(result) {
+      lastCheckResult = result;
       $('check_summary').innerHTML = `error: <b class="err">${result.errorCount}</b> | warning: <b class="warn">${result.warningCount}</b> | status: <b class="${result.ok ? 'ok' : 'err'}">${result.ok ? 'PASS' : 'FAIL'}</b>`;
       const lines = [];
       if (result.errors.length) {
@@ -1791,6 +2084,7 @@
       }
       if (!lines.length) lines.push('<div class="ok">No error/warn message.</div>');
       $('check_log').innerHTML = lines.join('');
+      emitBridgeState('check');
     }
 
     function setMode(nextMode) {
@@ -1802,6 +2096,7 @@
       connectSelection = [];
       extendDraft = null;
       render();
+      emitBridgeState('mode');
     }
 
     $('bg_file').addEventListener('change', (e) => {
@@ -1852,7 +2147,7 @@
         fillRoadForm();
         if (selectedRoadIndex >= 0) {
           fillPopupForm();
-          showRoadPopup(e.clientX - rect.left, e.clientY - rect.top, true);
+          if (!embedMode) showRoadPopup(e.clientX - rect.left, e.clientY - rect.top, true);
         } else {
           hideRoadPopup();
         }
@@ -1994,6 +2289,7 @@
         const { xodr } = await postJson('/api/generate-xodr', currentSpec());
         lastXodr = xodr;
         $('xodr_text').value = xodr;
+        emitBridgeState('xodr');
       } catch (err) {
         $('xodr_text').value = String(err.message || err);
       }
@@ -2020,6 +2316,10 @@
     fillRoadForm();
     refreshRoadList();
     render();
+    if (window.parent && window.parent !== window) {
+      window.parent.postMessage({ source: 'odr-legacy', type: 'ready' }, '*');
+      emitBridgeState('ready');
+    }
   })();
   </script>
 </body>
