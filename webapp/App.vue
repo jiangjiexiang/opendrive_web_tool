@@ -6,6 +6,7 @@
         <button type="button" class="mode-btn" :class="{ active: mode === 'select' }" @click="setMode('select')">选择</button>
         <button type="button" class="mode-btn" :class="{ active: mode === 'connect' }" @click="setMode('connect')">连接</button>
         <button type="button" class="mode-btn" :class="{ active: mode === 'extend' }" @click="setMode('extend')">延伸</button>
+        <button type="button" class="mode-btn" :class="{ active: mode === 'junction' }" @click="setMode('junction')">路口</button>
       </div>
       <div class="toolbar-group">
         <button type="button" @click="finishRoad">完成道路</button>
@@ -25,9 +26,9 @@
     <aside class="sidebar left-rail">
       <h1>OpenDRIVE 编辑器</h1>
       <p class="desc">左侧道路区</p>
-      <section class="panel">
+      <section class="panel road-panel">
         <h2>Roads ({{ roads.length }})</h2>
-        <div class="road-list">
+        <div class="road-list road-list-fill">
           <div v-for="(road, i) in roads" :key="`${road.id}-${i}`" class="road-tree-item">
             <button
               type="button"
@@ -86,12 +87,38 @@
             <input v-model.number="connectForm.smoothness" type="range" min="0.1" max="0.8" step="0.01" />
           </label>
           <label>数值<input v-model.number="connectForm.smoothness" type="number" min="0.1" max="0.8" step="0.01" /></label>
+          <label>端点重叠(m)<input v-model.number="connectForm.overlap" type="number" min="0" max="6" step="0.1" /></label>
           <div class="meta">连接模式下点击两个端点小球自动生成弯道</div>
           <div style="grid-column: 1 / -1;" class="meta">第一点: {{ getConnectHandleText(connectDraft.first) }}</div>
           <div style="grid-column: 1 / -1;" class="meta">第二点: {{ getConnectHandleText(connectDraft.second) }}</div>
           <div class="row" style="grid-column: 1 / -1; margin-top: 4px;">
             <button type="button" @click="clearConnectDraft">清空端点选择</button>
             <button type="button" :disabled="!selectedRoad?.connectorMeta" @click="rebuildSelectedConnector">重建选中弯道</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>自动路口生成</h2>
+        <div class="grid2">
+          <label>边缘留白(m)
+            <input v-model.number="junctionForm.edgePadding" type="number" min="1" step="0.5" />
+          </label>
+          <label>内部平滑度
+            <input v-model.number="junctionForm.smoothness" type="number" min="0.1" max="0.9" step="0.01" />
+          </label>
+          <label style="grid-column: 1 / -1;">车道过渡长度(m)
+            <input v-model.number="junctionForm.transitionLength" type="number" min="3" step="1" />
+          </label>
+          <div style="grid-column: 1 / -1;" class="meta">路口模式下，依次点击 3~4 条彼此分离道路的端点，小球选择逻辑与弯道模式一致。</div>
+          <div style="grid-column: 1 / -1;" class="meta">点1: {{ getConnectHandleText(junctionDraft.handles[0]) }}</div>
+          <div style="grid-column: 1 / -1;" class="meta">点2: {{ getConnectHandleText(junctionDraft.handles[1]) }}</div>
+          <div style="grid-column: 1 / -1;" class="meta">点3: {{ getConnectHandleText(junctionDraft.handles[2]) }}</div>
+          <div style="grid-column: 1 / -1;" class="meta">点4(可选): {{ getConnectHandleText(junctionDraft.handles[3]) }}</div>
+          <div style="grid-column: 1 / -1;" class="meta">已生成路口: {{ junctionMeshes.length }}</div>
+          <div class="row" style="grid-column: 1 / -1; margin-top: 4px;">
+            <button type="button" :disabled="junctionDraft.handles.length < 3" @click="generateJunctionFromDraft">生成路口</button>
+            <button type="button" @click="clearJunctionDraft">清空路口端点选择</button>
           </div>
         </div>
       </section>
@@ -184,6 +211,8 @@ const mode = ref('select');
 const drawingPoints = ref([]);
 const connectDraft = ref({ first: null, second: null });
 const extendDraft = ref(null);
+const junctionDraft = ref({ handles: [] });
+const junctionMeshes = ref([]);
 const bgImage = ref(null);
 const lastXodr = ref('');
 const importedXodrText = ref('');
@@ -214,7 +243,14 @@ const roadForm = reactive({
 });
 
 const connectForm = reactive({
-  smoothness: 0.35
+  smoothness: 0.35,
+  overlap: 1.2
+});
+
+const junctionForm = reactive({
+  edgePadding: 6,
+  smoothness: 0.34,
+  transitionLength: 16
 });
 
 const validateDialog = reactive({
@@ -266,6 +302,9 @@ watch(selectedRoad, (road) => {
   if (road.connectorMeta?.smoothness) {
     connectForm.smoothness = Number(road.connectorMeta.smoothness);
   }
+  if (road.connectorMeta?.overlap !== undefined) {
+    connectForm.overlap = Number(road.connectorMeta.overlap);
+  }
 });
 
 watch(
@@ -313,6 +352,105 @@ function getConnectHandleText(handle) {
 function clearConnectDraft() {
   connectDraft.value = { first: null, second: null };
   render();
+}
+
+function clearJunctionDraft() {
+  junctionDraft.value = { handles: [] };
+  render();
+}
+
+function clamp(v, min, max) {
+  return Math.max(min, Math.min(max, v));
+}
+
+function vecAdd(a, b) {
+  return { x: a.x + b.x, y: a.y + b.y };
+}
+
+function vecSub(a, b) {
+  return { x: a.x - b.x, y: a.y - b.y };
+}
+
+function vecScale(v, s) {
+  return { x: v.x * s, y: v.y * s };
+}
+
+function vecDot(a, b) {
+  return a.x * b.x + a.y * b.y;
+}
+
+function vecLen(v) {
+  return Math.hypot(v.x, v.y);
+}
+
+function normalizeVec(v, fallback = { x: 1, y: 0 }) {
+  const len = vecLen(v);
+  if (len < 1e-8) return { ...fallback };
+  return { x: v.x / len, y: v.y / len };
+}
+
+function perpLeft(v) {
+  return { x: -v.y, y: v.x };
+}
+
+function convexHull(points) {
+  const pts = (points || [])
+    .map((p) => ({ x: Number(p.x), y: Number(p.y) }))
+    .filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y));
+  if (pts.length <= 2) return pts;
+  pts.sort((a, b) => (a.x === b.x ? a.y - b.y : a.x - b.x));
+  const cross = (o, a, b) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+  const lower = [];
+  for (const p of pts) {
+    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) {
+      lower.pop();
+    }
+    lower.push(p);
+  }
+  const upper = [];
+  for (let i = pts.length - 1; i >= 0; i -= 1) {
+    const p = pts[i];
+    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) {
+      upper.pop();
+    }
+    upper.push(p);
+  }
+  lower.pop();
+  upper.pop();
+  return lower.concat(upper);
+}
+
+function solveVirtualIntersection(approaches) {
+  if (!Array.isArray(approaches) || !approaches.length) return null;
+  let a11 = 0;
+  let a12 = 0;
+  let a22 = 0;
+  let b1 = 0;
+  let b2 = 0;
+  let avgX = 0;
+  let avgY = 0;
+  approaches.forEach((a) => {
+    const d = normalizeVec(a.dir);
+    const p = a.pose;
+    const m00 = 1 - d.x * d.x;
+    const m01 = -d.x * d.y;
+    const m11 = 1 - d.y * d.y;
+    a11 += m00;
+    a12 += m01;
+    a22 += m11;
+    b1 += m00 * p.x + m01 * p.y;
+    b2 += m01 * p.x + m11 * p.y;
+    avgX += p.x;
+    avgY += p.y;
+  });
+  avgX /= approaches.length;
+  avgY /= approaches.length;
+  const det = a11 * a22 - a12 * a12;
+  if (Math.abs(det) < 1e-6) return { x: avgX, y: avgY };
+  return {
+    x: (b1 * a22 - b2 * a12) / det,
+    y: (a11 * b2 - a12 * b1) / det
+  };
 }
 
 function detachImportedSource() {
@@ -604,7 +742,7 @@ function drawLaneDirectionArrows(road) {
 }
 
 function drawHandles() {
-  if (mode.value !== 'extend' && mode.value !== 'connect') return;
+  if (mode.value !== 'extend' && mode.value !== 'connect' && mode.value !== 'junction') return;
   getAllHandles().forEach((h) => {
     const p = worldToScreen(h.x, h.y);
     const chosenInConnect = mode.value === 'connect'
@@ -614,12 +752,14 @@ function drawHandles() {
       || (connectDraft.value.second
         && connectDraft.value.second.roadIdx === h.roadIdx
         && connectDraft.value.second.endpoint === h.endpoint));
+    const chosenInJunction = mode.value === 'junction'
+      && (junctionDraft.value.handles || []).some((it) => it.roadIdx === h.roadIdx && it.endpoint === h.endpoint);
     ctx.beginPath();
-    ctx.arc(p.x, p.y, chosenInConnect ? 6.5 : 5, 0, Math.PI * 2);
+    ctx.arc(p.x, p.y, (chosenInConnect || chosenInJunction) ? 6.5 : 5, 0, Math.PI * 2);
     ctx.fillStyle = h.endpoint === 'start' ? '#6ad0ff' : '#ffd16a';
     ctx.fill();
-    ctx.strokeStyle = chosenInConnect ? '#f8fcff' : '#0f141a';
-    ctx.lineWidth = chosenInConnect ? 2 : 1.2;
+    ctx.strokeStyle = (chosenInConnect || chosenInJunction) ? '#f8fcff' : '#0f141a';
+    ctx.lineWidth = (chosenInConnect || chosenInJunction) ? 2 : 1.2;
     ctx.stroke();
   });
 }
@@ -649,6 +789,43 @@ function drawDraftRoadPreview() {
   drawPolyline(drawingPoints.value, '#9be7ff', 1.2, true, true);
 }
 
+function drawJunctionMeshes() {
+  (junctionMeshes.value || []).forEach((mesh) => {
+    if (Array.isArray(mesh.polygon) && mesh.polygon.length >= 3) {
+      const p0 = worldToScreen(mesh.polygon[0].x, mesh.polygon[0].y);
+      ctx.beginPath();
+      ctx.moveTo(p0.x, p0.y);
+      for (let i = 1; i < mesh.polygon.length; i += 1) {
+        const p = worldToScreen(mesh.polygon[i].x, mesh.polygon[i].y);
+        ctx.lineTo(p.x, p.y);
+      }
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(238, 181, 98, 0.22)';
+      ctx.strokeStyle = 'rgba(255, 221, 155, 0.78)';
+      ctx.lineWidth = 1.2;
+      ctx.fill();
+      ctx.stroke();
+    }
+    (mesh.approaches || []).forEach((a) => {
+      if (a?.anchor && a?.boundary) {
+        drawPolyline([a.anchor, a.boundary], 'rgba(118, 251, 209, 0.7)', 1.8, true);
+      }
+    });
+    (mesh.internalLaneCurves || []).forEach((curve) => {
+      if (curve?.length > 1) {
+        drawPolyline(curve, 'rgba(255, 246, 166, 0.65)', 1.1, true);
+      }
+    });
+    if (mesh.center) {
+      const c = worldToScreen(mesh.center.x, mesh.center.y);
+      ctx.beginPath();
+      ctx.arc(c.x, c.y, 3.4, 0, Math.PI * 2);
+      ctx.fillStyle = '#fff4be';
+      ctx.fill();
+    }
+  });
+}
+
 function render() {
   if (!ctx || !canvasEl.value) return;
   const canvas = canvasEl.value;
@@ -658,6 +835,7 @@ function render() {
     const p = worldToScreen(0, 0);
     ctx.drawImage(bgImage.value, p.x, p.y, bgImage.value.width * view.scale, bgImage.value.height * view.scale);
   }
+  drawJunctionMeshes();
   roads.value.forEach((r, idx) => {
     const sel = idx === selectedRoadIndex.value;
     drawRoadSurface(r, sel);
@@ -812,6 +990,335 @@ function sampleBezier(p0, p1, p2, p3, segments = 24) {
   return pts;
 }
 
+function nextJunctionId() {
+  let maxId = 0;
+  (junctionMeshes.value || []).forEach((j) => {
+    const n = Number.parseInt(j.id, 10);
+    if (Number.isFinite(n)) maxId = Math.max(maxId, n);
+  });
+  return maxId + 1;
+}
+
+function mapLaneIndex(laneIdx, fromCount, toCount) {
+  const fromN = Math.max(1, Number(fromCount || 1));
+  const toN = Math.max(1, Number(toCount || 1));
+  if (fromN === 1 || toN === 1) return 1;
+  const t = (laneIdx - 1) / (fromN - 1);
+  return clamp(Math.round(1 + t * (toN - 1)), 1, toN);
+}
+
+function laneCenterOffset(laneIdx, laneCount, laneWidth) {
+  const n = Math.max(1, Number(laneCount || 1));
+  const w = Math.max(0.5, Number(laneWidth || 3.5));
+  return (laneIdx - (n + 1) / 2) * w;
+}
+
+function orientApproachesToward(approaches, target) {
+  approaches.forEach((a) => {
+    const toTarget = vecSub(target, a.pose);
+    if (vecDot(toTarget, a.dir) < 0) {
+      a.dir = vecScale(a.dir, -1);
+    }
+  });
+}
+
+function collectApproachInfo(handle) {
+  const road = roads.value[handle.roadIdx];
+  if (!road) return null;
+  const pose = roadPoseAtEnd(road, handle.endpoint === 'start');
+  if (!pose) return null;
+  const incomingDir = normalizeVec(endpointDirection(handle.endpoint, pose.hdg));
+  const outgoingDir = vecScale(incomingDir, -1);
+  const leftLaneCount = Math.max(0, Number(road.leftLaneCount || 0));
+  const rightLaneCount = Math.max(0, Number(road.rightLaneCount || 0));
+  const leftLaneWidth = Math.max(0.5, Number(road.leftLaneWidth || road.laneWidth || 3.5));
+  const rightLaneWidth = Math.max(0.5, Number(road.rightLaneWidth || road.laneWidth || 3.5));
+  const incomingCount = handle.endpoint === 'end' ? leftLaneCount : rightLaneCount;
+  const outgoingCount = handle.endpoint === 'end' ? rightLaneCount : leftLaneCount;
+  const incomingWidth = handle.endpoint === 'end' ? leftLaneWidth : rightLaneWidth;
+  const outgoingWidth = handle.endpoint === 'end' ? rightLaneWidth : leftLaneWidth;
+  const totalRoadWidth = Math.max(2, leftLaneCount * leftLaneWidth + rightLaneCount * rightLaneWidth);
+  return {
+    handle: { roadIdx: handle.roadIdx, endpoint: handle.endpoint },
+    road,
+    pose: { x: pose.x, y: pose.y, hdg: pose.hdg },
+    dir: incomingDir,
+    incomingDir,
+    outgoingDir,
+    incomingNormal: perpLeft(incomingDir),
+    outgoingNormal: perpLeft(outgoingDir),
+    incomingCount,
+    outgoingCount,
+    incomingWidth,
+    outgoingWidth,
+    totalRoadWidth,
+    halfWidth: totalRoadWidth * 0.5
+  };
+}
+
+function buildConnectorCenterline(fromApproach, toApproach, smoothness) {
+  const p0 = fromApproach.boundary;
+  const p3 = toApproach.boundary;
+  const d0 = normalizeVec(fromApproach.incomingDir || fromApproach.dir);
+  const d3 = normalizeVec(toApproach.outgoingDir || vecScale(toApproach.dir, -1));
+  const minRadius = Math.max(3, Number(fromApproach.halfWidth || 0) + Number(toApproach.halfWidth || 0) + 1.2);
+  return buildBezierWithRadiusGuard(p0, p3, d0, d3, smoothness, minRadius);
+}
+
+function buildInternalLaneCurve(fromApproach, toApproach, fromLane, toLane, smoothness) {
+  const startOffset = laneCenterOffset(fromLane, fromApproach.incomingCount, fromApproach.incomingWidth);
+  const endOffset = laneCenterOffset(toLane, toApproach.outgoingCount, toApproach.outgoingWidth);
+  const p0 = vecAdd(fromApproach.boundary, vecScale(fromApproach.incomingNormal || fromApproach.normal, startOffset));
+  const p3 = vecAdd(toApproach.boundary, vecScale(toApproach.outgoingNormal || vecScale(toApproach.normal, -1), endOffset));
+  const d0 = normalizeVec(fromApproach.incomingDir || fromApproach.dir);
+  const d3 = normalizeVec(toApproach.outgoingDir || vecScale(toApproach.dir, -1));
+  const minRadius = Math.max(2, Math.max(Math.abs(startOffset), Math.abs(endOffset)) + 0.8);
+  return buildBezierWithRadiusGuard(p0, p3, d0, d3, smoothness, minRadius);
+}
+
+function dirAngle(a, b) {
+  const ua = normalizeVec(a);
+  const ub = normalizeVec(b);
+  return Math.acos(clamp(vecDot(ua, ub), -1, 1));
+}
+
+function buildBezierWithRadiusGuard(p0, p3, d0, d3, smoothness, minRadius) {
+  let start = { x: p0.x, y: p0.y };
+  let end = { x: p3.x, y: p3.y };
+  const angle = Math.max(0.02, dirAngle(d0, d3));
+  const radius = Math.max(1, Number(minRadius || 1));
+  let chord = Math.hypot(end.x - start.x, end.y - start.y);
+  const minChord = Math.max(0.5, 2 * radius * Math.sin(angle * 0.5));
+  if (chord < minChord) {
+    const extra = (minChord - chord) * 0.5;
+    start = vecSub(start, vecScale(d0, extra));
+    end = vecAdd(end, vecScale(d3, extra));
+    chord = Math.hypot(end.x - start.x, end.y - start.y);
+  }
+
+  const circularHandle = (4 / 3) * Math.tan(angle * 0.25) * radius;
+  let handleLen = Math.max(4, chord * Number(smoothness || 0.34), circularHandle);
+  handleLen = Math.min(handleLen, Math.max(8, chord * 1.2));
+
+  const p1 = vecAdd(start, vecScale(d0, handleLen));
+  const p2 = vecSub(end, vecScale(d3, handleLen));
+  return sampleBezier(start, p1, p2, end, Math.max(18, Math.ceil(chord / 1.8)));
+}
+
+function extendRoadEndpointToBoundary(road, endpoint, boundary) {
+  const pts = road?.points || [];
+  if (pts.length < 2) return;
+  if (endpoint === 'end') {
+    const last = pts[pts.length - 1];
+    const d = Math.hypot(boundary.x - last.x, boundary.y - last.y);
+    if (d < 0.1) {
+      last.x = boundary.x;
+      last.y = boundary.y;
+    } else {
+      pts.push({ x: boundary.x, y: boundary.y });
+    }
+  } else {
+    const first = pts[0];
+    const d = Math.hypot(boundary.x - first.x, boundary.y - first.y);
+    if (d < 0.1) {
+      first.x = boundary.x;
+      first.y = boundary.y;
+    } else {
+      pts.unshift({ x: boundary.x, y: boundary.y });
+    }
+  }
+  road.length = polylineLength(pts);
+  clearNativeGeometry(road);
+}
+
+function validateJunctionHandles(handles) {
+  if (!Array.isArray(handles) || handles.length < 3 || handles.length > 4) {
+    return '请先选择 3~4 个端点。';
+  }
+  const uniqRoads = new Set(handles.map((h) => String(h.roadIdx)));
+  if (uniqRoads.size !== handles.length) {
+    return '每个端点必须来自不同道路。';
+  }
+  const poses = handles.map((h) => {
+    const road = roads.value[h.roadIdx];
+    if (!road) return null;
+    return roadPoseAtEnd(road, h.endpoint === 'start');
+  });
+  if (poses.some((p) => !p)) {
+    return '存在无法识别的道路端点。';
+  }
+  for (let i = 0; i < poses.length; i += 1) {
+    for (let j = i + 1; j < poses.length; j += 1) {
+      if (Math.hypot(poses[i].x - poses[j].x, poses[i].y - poses[j].y) < 0.6) {
+        return '检测到端点过近（可能已经连接），请选择彼此分离的道路段。';
+      }
+    }
+  }
+  return '';
+}
+
+function generateJunctionFromHandles(handles) {
+  const invalidReason = validateJunctionHandles(handles);
+  if (invalidReason) return { ok: false, reason: invalidReason };
+
+  const approaches = handles.map((h) => collectApproachInfo(h)).filter(Boolean);
+  if (approaches.length < 3 || approaches.length > 4) {
+    return { ok: false, reason: '路口生成失败：端点解析不完整。' };
+  }
+
+  const centroid = approaches.reduce((acc, a) => ({ x: acc.x + a.pose.x, y: acc.y + a.pose.y }), { x: 0, y: 0 });
+  centroid.x /= approaches.length;
+  centroid.y /= approaches.length;
+
+  orientApproachesToward(approaches, centroid);
+  let center = solveVirtualIntersection(approaches) || centroid;
+  orientApproachesToward(approaches, center);
+  center = solveVirtualIntersection(approaches) || center;
+
+  const edgePadding = Math.max(1, Number(junctionForm.edgePadding || 6));
+  const refined = approaches.map((a) => {
+    const toCenter = vecSub(center, a.pose);
+    const projected = vecDot(toCenter, a.dir);
+    const clearance = a.halfWidth + edgePadding;
+    let advance = projected - clearance;
+    if (!Number.isFinite(advance)) advance = vecLen(toCenter) * 0.55;
+    if (projected > 0.8) {
+      advance = clamp(advance, 0.8, Math.max(0.8, projected - 0.4));
+    } else {
+      advance = 0.8;
+    }
+    const boundary = vecAdd(a.pose, vecScale(a.dir, advance));
+    const normal = perpLeft(a.dir);
+    const leftEdge = vecAdd(boundary, vecScale(normal, a.halfWidth));
+    const rightEdge = vecAdd(boundary, vecScale(normal, -a.halfWidth));
+    const radial = normalizeVec(vecSub(boundary, center), vecScale(a.dir, -1));
+    return {
+      ...a,
+      anchor: { x: a.pose.x, y: a.pose.y },
+      boundary,
+      normal,
+      leftEdge,
+      rightEdge,
+      angle: Math.atan2(radial.y, radial.x)
+    };
+  }).sort((a, b) => a.angle - b.angle);
+
+  const meshPolygon = convexHull(refined.flatMap((a) => [a.leftEdge, a.rightEdge]));
+  if (meshPolygon.length < 3) {
+    return { ok: false, reason: '路口生成失败：无法构造有效路口多边形。' };
+  }
+
+  detachImportedSource();
+
+  refined.forEach((a) => {
+    extendRoadEndpointToBoundary(a.road, a.handle.endpoint, a.boundary);
+  });
+
+  const generatedRoadIds = [];
+  const laneCurves = [];
+  const connectorMeta = [];
+  for (const from of refined) {
+    if (from.incomingCount <= 0) continue;
+    for (const to of refined) {
+      if (to === from || to.outgoingCount <= 0) continue;
+      const centerline = buildConnectorCenterline(from, to, junctionForm.smoothness);
+      if (!centerline || centerline.length < 2) continue;
+
+      const transitionType = from.incomingCount === to.outgoingCount
+        ? 'match'
+        : (from.incomingCount > to.outgoingCount ? 'merge' : 'split');
+      const laneMap = [];
+      const fromCount = Math.max(1, Number(from.incomingCount || 1));
+      const toCount = Math.max(1, Number(to.outgoingCount || 1));
+      for (let lane = 1; lane <= fromCount; lane += 1) {
+        const mapped = mapLaneIndex(lane, fromCount, toCount);
+        laneMap.push({ from: lane, to: mapped });
+      }
+
+      const connectorRoad = defaultRoadFromPoints(centerline);
+      connectorRoad.points = centerline;
+      connectorRoad.length = polylineLength(centerline);
+      connectorRoad.leftLaneCount = fromCount;
+      connectorRoad.rightLaneCount = 0;
+      connectorRoad.leftLaneWidth = Math.max(0.5, Number(from.incomingWidth || 3.5));
+      connectorRoad.rightLaneWidth = connectorRoad.leftLaneWidth;
+      connectorRoad.laneWidth = connectorRoad.leftLaneWidth;
+      connectorRoad.centerType = 'none';
+      connectorRoad.predecessorType = 'road';
+      connectorRoad.predecessorId = String(from.road.id);
+      connectorRoad.successorType = 'road';
+      connectorRoad.successorId = String(to.road.id);
+      connectorRoad.connectorMeta = {
+        kind: 'junction_internal',
+        fromRoadId: String(from.road.id),
+        toRoadId: String(to.road.id),
+        fromEndpoint: from.handle.endpoint,
+        toEndpoint: to.handle.endpoint
+      };
+      connectorRoad.transitionMeta = {
+        type: transitionType,
+        fromLaneCount: fromCount,
+        toLaneCount: toCount,
+        fromLaneWidth: Number(from.incomingWidth || 3.5),
+        toLaneWidth: Number(to.outgoingWidth || 3.5),
+        transitionLength: Math.max(3, Number(junctionForm.transitionLength || 16)),
+        laneMap
+      };
+      connectorRoad.internalLaneCurves = laneMap.map((m) => buildInternalLaneCurve(
+        from,
+        to,
+        m.from,
+        m.to,
+        junctionForm.smoothness
+      ));
+      connectorRoad.internalLaneCurves.forEach((curve) => laneCurves.push(curve));
+      clearNativeGeometry(connectorRoad);
+      roads.value.push(connectorRoad);
+      generatedRoadIds.push(String(connectorRoad.id));
+      connectorMeta.push({
+        roadId: String(connectorRoad.id),
+        fromRoadId: String(from.road.id),
+        toRoadId: String(to.road.id),
+        transition: transitionType
+      });
+    }
+  }
+
+  const meshId = nextJunctionId();
+  junctionMeshes.value.push({
+    id: meshId,
+    center,
+    polygon: meshPolygon,
+    approaches: refined.map((a) => ({
+      roadId: String(a.road.id),
+      endpoint: a.handle.endpoint,
+      anchor: a.anchor,
+      boundary: a.boundary
+    })),
+    connectorMeta,
+    internalLaneCurves: laneCurves
+  });
+
+  if (generatedRoadIds.length) {
+    const lastAddedRoadId = generatedRoadIds[generatedRoadIds.length - 1];
+    selectedRoadIndex.value = roads.value.findIndex((r) => String(r.id) === lastAddedRoadId);
+  } else {
+    selectedRoadIndex.value = refined.length ? refined[0].handle.roadIdx : -1;
+  }
+  render();
+  return { ok: true };
+}
+
+function generateJunctionFromDraft() {
+  const handles = (junctionDraft.value.handles || []).slice();
+  const result = generateJunctionFromHandles(handles);
+  junctionDraft.value = { handles: [] };
+  if (!result.ok) {
+    window.alert(result.reason || '自动路口生成失败。');
+    render();
+  }
+}
+
 function buildBezierBetweenHandles(firstHandle, secondHandle, smoothness) {
   const firstRoad = roads.value[firstHandle.roadIdx];
   const secondRoad = roads.value[secondHandle.roadIdx];
@@ -819,14 +1326,55 @@ function buildBezierBetweenHandles(firstHandle, secondHandle, smoothness) {
   const p0 = roadPoseAtEnd(firstRoad, firstHandle.endpoint === 'start');
   const p3 = roadPoseAtEnd(secondRoad, secondHandle.endpoint === 'start');
   if (!p0 || !p3) return null;
-  const dist = Math.hypot(p3.x - p0.x, p3.y - p0.y);
-  const handleLen = Math.max(4, Math.min(120, dist * Number(smoothness || 0.35)));
+  const overlap = clamp(Number(connectForm.overlap || 0), 0, 6);
   const d0 = endpointDirection(firstHandle.endpoint, p0.hdg);
   const d3 = endpointFinalDirection(secondHandle.endpoint, p3.hdg);
-  const p1 = { x: p0.x + d0.x * handleLen, y: p0.y + d0.y * handleLen };
-  const p2 = { x: p3.x - d3.x * handleLen, y: p3.y - d3.y * handleLen };
-  const points = sampleBezier(p0, p1, p2, p3, Math.max(16, Math.ceil(dist / 2)));
-  return { points, firstRoad, secondRoad };
+
+  // Geometry-level stitching: move curve ends slightly into both roads to create physical overlap.
+  const start = { x: p0.x - d0.x * overlap, y: p0.y - d0.y * overlap };
+  const end = { x: p3.x + d3.x * overlap, y: p3.y + d3.y * overlap };
+  const dist = Math.hypot(end.x - start.x, end.y - start.y);
+  const handleLen = Math.max(4, Math.min(120, dist * Number(smoothness || 0.35)));
+  const p1 = { x: start.x + d0.x * handleLen, y: start.y + d0.y * handleLen };
+  const p2 = { x: end.x - d3.x * handleLen, y: end.y - d3.y * handleLen };
+  const points = sampleBezier(start, p1, p2, end, Math.max(16, Math.ceil(dist / 2)));
+  return { points, firstRoad, secondRoad, overlap };
+}
+
+function laneProfileAtConnectorSide(road, endpoint, sideMode) {
+  const leftCount = Math.max(0, Number(road.leftLaneCount || 0));
+  const rightCount = Math.max(0, Number(road.rightLaneCount || 0));
+  const leftWidth = Math.max(0.5, Number(road.leftLaneWidth || road.laneWidth || 3.5));
+  const rightWidth = Math.max(0.5, Number(road.rightLaneWidth || road.laneWidth || 3.5));
+  let swap = false;
+  if (sideMode === 'outward') {
+    swap = endpoint === 'start';
+  } else if (sideMode === 'inward') {
+    swap = endpoint === 'end';
+  }
+  if (!swap) {
+    return { leftCount, rightCount, leftWidth, rightWidth };
+  }
+  return {
+    leftCount: rightCount,
+    rightCount: leftCount,
+    leftWidth: rightWidth,
+    rightWidth: leftWidth
+  };
+}
+
+function blendedConnectorProfile(firstRoad, firstEndpoint, secondRoad, secondEndpoint) {
+  const a = laneProfileAtConnectorSide(firstRoad, firstEndpoint, 'outward');
+  const b = laneProfileAtConnectorSide(secondRoad, secondEndpoint, 'inward');
+  let leftCount = Math.round((a.leftCount + b.leftCount) / 2);
+  let rightCount = Math.round((a.rightCount + b.rightCount) / 2);
+  if (leftCount + rightCount <= 0) rightCount = 1;
+  return {
+    leftLaneCount: Math.max(0, leftCount),
+    rightLaneCount: Math.max(0, rightCount),
+    leftLaneWidth: Math.max(0.5, (a.leftWidth + b.leftWidth) * 0.5),
+    rightLaneWidth: Math.max(0.5, (a.rightWidth + b.rightWidth) * 0.5)
+  };
 }
 
 function connectRoadsWithBezier(firstHandle, secondHandle, smoothness) {
@@ -834,16 +1382,23 @@ function connectRoadsWithBezier(firstHandle, secondHandle, smoothness) {
   if (firstHandle.roadIdx === secondHandle.roadIdx) return false;
   const built = buildBezierBetweenHandles(firstHandle, secondHandle, smoothness);
   if (!built) return false;
-  const { points, firstRoad, secondRoad } = built;
+  const { points, firstRoad, secondRoad, overlap } = built;
   const newRoad = defaultRoadFromPoints(points);
+  const profile = blendedConnectorProfile(firstRoad, firstHandle.endpoint, secondRoad, secondHandle.endpoint);
   newRoad.points = points;
   newRoad.length = polylineLength(points);
+  newRoad.leftLaneCount = profile.leftLaneCount;
+  newRoad.rightLaneCount = profile.rightLaneCount;
+  newRoad.leftLaneWidth = profile.leftLaneWidth;
+  newRoad.rightLaneWidth = profile.rightLaneWidth;
+  newRoad.laneWidth = (profile.leftLaneWidth + profile.rightLaneWidth) * 0.5;
   newRoad.connectorMeta = {
     fromRoadId: String(firstRoad.id),
     toRoadId: String(secondRoad.id),
     fromEndpoint: firstHandle.endpoint,
     toEndpoint: secondHandle.endpoint,
-    smoothness: Number(smoothness || 0.35)
+    smoothness: Number(smoothness || 0.35),
+    overlap: Number(overlap || 0)
   };
   newRoad.predecessorType = 'road';
   newRoad.predecessorId = String(firstRoad.id);
@@ -882,9 +1437,16 @@ function rebuildSelectedConnector() {
   const secondHandle = { roadIdx: toIdx, endpoint: road.connectorMeta.toEndpoint };
   const built = buildBezierBetweenHandles(firstHandle, secondHandle, connectForm.smoothness);
   if (!built) return;
+  const profile = blendedConnectorProfile(roads.value[fromIdx], firstHandle.endpoint, roads.value[toIdx], secondHandle.endpoint);
   road.points = built.points;
   road.length = polylineLength(road.points);
+  road.leftLaneCount = profile.leftLaneCount;
+  road.rightLaneCount = profile.rightLaneCount;
+  road.leftLaneWidth = profile.leftLaneWidth;
+  road.rightLaneWidth = profile.rightLaneWidth;
+  road.laneWidth = (profile.leftLaneWidth + profile.rightLaneWidth) * 0.5;
   road.connectorMeta.smoothness = Number(connectForm.smoothness);
+  road.connectorMeta.overlap = Number(connectForm.overlap || 0);
   clearNativeGeometry(road);
   detachImportedSource();
   render();
@@ -948,6 +1510,7 @@ function setMode(next) {
   mode.value = next;
   connectDraft.value = { first: null, second: null };
   extendDraft.value = null;
+  junctionDraft.value = { handles: [] };
   render();
 }
 
@@ -974,7 +1537,20 @@ function undoPoint() {
 function deleteRoad() {
   if (selectedRoadIndex.value < 0) return;
   detachImportedSource();
+  const removedRoad = roads.value[selectedRoadIndex.value];
   roads.value.splice(selectedRoadIndex.value, 1);
+  if (removedRoad) {
+    const removedId = String(removedRoad.id);
+    junctionMeshes.value = (junctionMeshes.value || []).filter((mesh) => {
+      const relatedApproach = (mesh.approaches || []).some((a) => String(a.roadId) === removedId);
+      const relatedConnector = (mesh.connectorMeta || []).some((c) => (
+        String(c.roadId) === removedId
+        || String(c.fromRoadId) === removedId
+        || String(c.toRoadId) === removedId
+      ));
+      return !relatedApproach && !relatedConnector;
+    });
+  }
   selectedRoadIndex.value = -1;
   render();
 }
@@ -1122,6 +1698,8 @@ function applyNativeRoads(parsedRoads) {
   }));
   roads.value = normalized;
   drawingPoints.value = [];
+  junctionDraft.value = { handles: [] };
+  junctionMeshes.value = [];
   selectedRoadIndex.value = normalized.length ? 0 : -1;
   fitView();
   render();
@@ -1207,6 +1785,34 @@ function handleCanvasClick(e) {
     connectDraft.value = { first: null, second: null };
     return;
   }
+  if (mode.value === 'junction') {
+    const handle = pickHandle(sx, sy);
+    if (!handle) return;
+    const existsAt = (junctionDraft.value.handles || []).findIndex((h) => (
+      h.roadIdx === handle.roadIdx && h.endpoint === handle.endpoint
+    ));
+    if (existsAt >= 0) {
+      junctionDraft.value.handles.splice(existsAt, 1);
+      render();
+      return;
+    }
+    if ((junctionDraft.value.handles || []).some((h) => h.roadIdx === handle.roadIdx)) {
+      window.alert('同一条道路只能选择一个端点，请改选其他道路。');
+      return;
+    }
+    if ((junctionDraft.value.handles || []).length >= 4) {
+      window.alert('最多选择 4 个端点。');
+      return;
+    }
+    junctionDraft.value.handles.push({ roadIdx: handle.roadIdx, endpoint: handle.endpoint });
+    selectedRoadIndex.value = handle.roadIdx;
+    if (junctionDraft.value.handles.length === 4) {
+      generateJunctionFromDraft();
+      return;
+    }
+    render();
+    return;
+  }
   if (mode.value === 'extend') {
     if (!extendDraft.value) {
       const handle = pickHandle(sx, sy);
@@ -1264,7 +1870,21 @@ function handleMouseUp() {
   view.panning = false;
 }
 
+function isEditableElement(target) {
+  if (!target || !(target instanceof Element)) return false;
+  const tag = target.tagName?.toUpperCase?.() || '';
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
+  if (target instanceof HTMLElement && target.isContentEditable) return true;
+  return Boolean(target.closest('input, textarea, select, [contenteditable="true"]'));
+}
+
 function handleKeyDown(e) {
+  if (!isEditableElement(e.target) && (e.key === 'Delete' || e.key === 'Backspace')) {
+    if (selectedRoadIndex.value >= 0) {
+      e.preventDefault();
+      deleteRoad();
+    }
+  }
   if (e.code === 'Space') view.spaceDown = true;
 }
 

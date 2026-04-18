@@ -60,6 +60,9 @@ body,
 
 .left-rail {
   border-right: 1px solid rgba(255, 255, 255, 0.16);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 
 .right-rail {
@@ -183,6 +186,45 @@ button:hover,
   gap: 6px;
   max-height: 340px;
   overflow: auto;
+  padding-right: 4px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(140, 211, 255, 0.62) rgba(10, 24, 36, 0.28);
+}
+
+.road-list::-webkit-scrollbar {
+  width: 11px;
+}
+
+.road-list::-webkit-scrollbar-track {
+  background: rgba(10, 24, 36, 0.28);
+  border-radius: 999px;
+}
+
+.road-list::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, rgba(151, 236, 255, 0.86), rgba(112, 188, 244, 0.86));
+  border: 2px solid rgba(8, 18, 30, 0.9);
+  border-radius: 999px;
+}
+
+.road-list::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(180deg, rgba(181, 244, 255, 0.94), rgba(130, 206, 255, 0.92));
+}
+
+.road-list::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+.road-panel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.road-list-fill {
+  flex: 1;
+  min-height: 0;
+  max-height: none;
 }
 
 .road-tree-item {
@@ -408,6 +450,7 @@ code {
   }
 
   .left-rail {
+    display: block;
     border-right: 0;
     border-bottom: 1px solid rgba(255, 255, 255, 0.16);
   }
