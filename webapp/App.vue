@@ -28,18 +28,29 @@
       <section class="panel">
         <h2>Roads ({{ roads.length }})</h2>
         <div class="road-list">
-          <button
-            v-for="(road, i) in roads"
-            :key="`${road.id}-${i}`"
-            type="button"
-            class="road-item"
-            :class="{ selected: i === selectedRoadIndex }"
-            @click="selectRoad(i)"
-          >
-            <div>Road {{ road.id }} | len={{ formatNum(road.length, 2) }} | pts={{ road.points.length }}</div>
-            <div class="meta">pred={{ road.predecessorId || '-' }} | succ={{ road.successorId || '-' }}</div>
-            <div class="meta">关联小路: {{ getChildrenText(road.id) }}</div>
-          </button>
+          <div v-for="(road, i) in roads" :key="`${road.id}-${i}`" class="road-tree-item">
+            <button
+              type="button"
+              class="road-item"
+              :class="{ selected: i === selectedRoadIndex }"
+              @click="selectRoad(i)"
+            >
+              <div>Road {{ road.id }} | len={{ formatNum(road.length, 2) }} | pts={{ road.points.length }}</div>
+              <div class="meta">pred={{ road.predecessorId || '-' }} | succ={{ road.successorId || '-' }}</div>
+            </button>
+            <div v-if="getChildRoadEntries(road.id).length" class="child-road-list">
+              <button
+                v-for="child in getChildRoadEntries(road.id)"
+                :key="`child-${road.id}-${child.index}`"
+                type="button"
+                class="child-road-item"
+                :class="{ selected: child.index === selectedRoadIndex }"
+                @click="selectRoad(child.index)"
+              >
+                ↳ Road {{ child.road.id }} | len={{ formatNum(child.road.length, 2) }} | pts={{ child.road.points.length }}
+              </button>
+            </div>
+          </div>
           <div v-if="!roads.length" class="empty">暂无道路</div>
         </div>
       </section>
@@ -65,6 +76,23 @@
           <label>south<input v-model.number="headerForm.south" type="number" /></label>
           <label>east<input v-model.number="headerForm.east" type="number" /></label>
           <label>west<input v-model.number="headerForm.west" type="number" /></label>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>弯道连接</h2>
+        <div class="grid2">
+          <label style="grid-column: 1 / -1;">贴合强度(越大弯道越“鼓”)
+            <input v-model.number="connectForm.smoothness" type="range" min="0.1" max="0.8" step="0.01" />
+          </label>
+          <label>数值<input v-model.number="connectForm.smoothness" type="number" min="0.1" max="0.8" step="0.01" /></label>
+          <div class="meta">连接模式下点击两个端点小球自动生成弯道</div>
+          <div style="grid-column: 1 / -1;" class="meta">第一点: {{ getConnectHandleText(connectDraft.first) }}</div>
+          <div style="grid-column: 1 / -1;" class="meta">第二点: {{ getConnectHandleText(connectDraft.second) }}</div>
+          <div class="row" style="grid-column: 1 / -1; margin-top: 4px;">
+            <button type="button" @click="clearConnectDraft">清空端点选择</button>
+            <button type="button" :disabled="!selectedRoad?.connectorMeta" @click="rebuildSelectedConnector">重建选中弯道</button>
+          </div>
         </div>
       </section>
 
@@ -154,7 +182,7 @@ const roads = ref([]);
 const selectedRoadIndex = ref(-1);
 const mode = ref('select');
 const drawingPoints = ref([]);
-const connectSelection = ref([]);
+const connectDraft = ref({ first: null, second: null });
 const extendDraft = ref(null);
 const bgImage = ref(null);
 const lastXodr = ref('');
@@ -183,6 +211,10 @@ const roadForm = reactive({
   predecessorId: '',
   successorType: 'road',
   successorId: ''
+});
+
+const connectForm = reactive({
+  smoothness: 0.35
 });
 
 const validateDialog = reactive({
@@ -231,6 +263,9 @@ watch(selectedRoad, (road) => {
   roadForm.predecessorId = road.predecessorId || '';
   roadForm.successorType = road.successorType || 'road';
   roadForm.successorId = road.successorId || '';
+  if (road.connectorMeta?.smoothness) {
+    connectForm.smoothness = Number(road.connectorMeta.smoothness);
+  }
 });
 
 watch(
@@ -253,6 +288,31 @@ function getChildrenText(roadId) {
   });
   const uniq = [...new Set(links)];
   return uniq.length ? uniq.join(', ') : '无';
+}
+
+function getChildRoadEntries(roadId) {
+  const out = [];
+  roads.value.forEach((r, index) => {
+    if (String(r.id) === String(roadId)) return;
+    const linkedByPred = String(r.predecessorId || '') === String(roadId);
+    const linkedBySucc = String(r.successorId || '') === String(roadId);
+    if (linkedByPred || linkedBySucc) {
+      out.push({ road: r, index });
+    }
+  });
+  return out;
+}
+
+function getConnectHandleText(handle) {
+  if (!handle) return '未选择';
+  const road = roads.value[handle.roadIdx];
+  if (!road) return '未选择';
+  return `Road ${road.id} ${handle.endpoint === 'start' ? '起点' : '终点'}`;
+}
+
+function clearConnectDraft() {
+  connectDraft.value = { first: null, second: null };
+  render();
 }
 
 function detachImportedSource() {
@@ -544,15 +604,22 @@ function drawLaneDirectionArrows(road) {
 }
 
 function drawHandles() {
-  if (mode.value !== 'extend') return;
+  if (mode.value !== 'extend' && mode.value !== 'connect') return;
   getAllHandles().forEach((h) => {
     const p = worldToScreen(h.x, h.y);
+    const chosenInConnect = mode.value === 'connect'
+      && ((connectDraft.value.first
+        && connectDraft.value.first.roadIdx === h.roadIdx
+        && connectDraft.value.first.endpoint === h.endpoint)
+      || (connectDraft.value.second
+        && connectDraft.value.second.roadIdx === h.roadIdx
+        && connectDraft.value.second.endpoint === h.endpoint));
     ctx.beginPath();
-    ctx.arc(p.x, p.y, 5, 0, Math.PI * 2);
+    ctx.arc(p.x, p.y, chosenInConnect ? 6.5 : 5, 0, Math.PI * 2);
     ctx.fillStyle = h.endpoint === 'start' ? '#6ad0ff' : '#ffd16a';
     ctx.fill();
-    ctx.strokeStyle = '#0f141a';
-    ctx.lineWidth = 1.2;
+    ctx.strokeStyle = chosenInConnect ? '#f8fcff' : '#0f141a';
+    ctx.lineWidth = chosenInConnect ? 2 : 1.2;
     ctx.stroke();
   });
 }
@@ -718,6 +785,20 @@ function roadPoseAtEnd(road, atStart) {
   return { x: p.x, y: p.y, hdg };
 }
 
+function endpointDirection(endpoint, hdg) {
+  if (endpoint === 'start') {
+    return { x: -Math.cos(hdg), y: -Math.sin(hdg) };
+  }
+  return { x: Math.cos(hdg), y: Math.sin(hdg) };
+}
+
+function endpointFinalDirection(endpoint, hdg) {
+  if (endpoint === 'end') {
+    return { x: -Math.cos(hdg), y: -Math.sin(hdg) };
+  }
+  return { x: Math.cos(hdg), y: Math.sin(hdg) };
+}
+
 function sampleBezier(p0, p1, p2, p3, segments = 24) {
   const pts = [];
   for (let i = 0; i <= segments; i += 1) {
@@ -731,33 +812,82 @@ function sampleBezier(p0, p1, p2, p3, segments = 24) {
   return pts;
 }
 
-function connectRoadsWithBezier(firstIdx, secondIdx) {
-  const first = roads.value[firstIdx];
-  const second = roads.value[secondIdx];
-  if (!first || !second || firstIdx === secondIdx) return false;
-  const p0 = roadPoseAtEnd(first, false);
-  const p3 = roadPoseAtEnd(second, true);
-  if (!p0 || !p3) return false;
+function buildBezierBetweenHandles(firstHandle, secondHandle, smoothness) {
+  const firstRoad = roads.value[firstHandle.roadIdx];
+  const secondRoad = roads.value[secondHandle.roadIdx];
+  if (!firstRoad || !secondRoad) return null;
+  const p0 = roadPoseAtEnd(firstRoad, firstHandle.endpoint === 'start');
+  const p3 = roadPoseAtEnd(secondRoad, secondHandle.endpoint === 'start');
+  if (!p0 || !p3) return null;
   const dist = Math.hypot(p3.x - p0.x, p3.y - p0.y);
-  const handleLen = Math.max(6, Math.min(80, dist * 0.35));
-  const p1 = { x: p0.x + Math.cos(p0.hdg) * handleLen, y: p0.y + Math.sin(p0.hdg) * handleLen };
-  const p2 = { x: p3.x - Math.cos(p3.hdg) * handleLen, y: p3.y - Math.sin(p3.hdg) * handleLen };
-  const newRoad = defaultRoadFromPoints(sampleBezier(p0, p1, p2, p3, Math.max(16, Math.ceil(dist / 2))));
+  const handleLen = Math.max(4, Math.min(120, dist * Number(smoothness || 0.35)));
+  const d0 = endpointDirection(firstHandle.endpoint, p0.hdg);
+  const d3 = endpointFinalDirection(secondHandle.endpoint, p3.hdg);
+  const p1 = { x: p0.x + d0.x * handleLen, y: p0.y + d0.y * handleLen };
+  const p2 = { x: p3.x - d3.x * handleLen, y: p3.y - d3.y * handleLen };
+  const points = sampleBezier(p0, p1, p2, p3, Math.max(16, Math.ceil(dist / 2)));
+  return { points, firstRoad, secondRoad };
+}
+
+function connectRoadsWithBezier(firstHandle, secondHandle, smoothness) {
+  if (!firstHandle || !secondHandle) return false;
+  if (firstHandle.roadIdx === secondHandle.roadIdx) return false;
+  const built = buildBezierBetweenHandles(firstHandle, secondHandle, smoothness);
+  if (!built) return false;
+  const { points, firstRoad, secondRoad } = built;
+  const newRoad = defaultRoadFromPoints(points);
+  newRoad.points = points;
+  newRoad.length = polylineLength(points);
+  newRoad.connectorMeta = {
+    fromRoadId: String(firstRoad.id),
+    toRoadId: String(secondRoad.id),
+    fromEndpoint: firstHandle.endpoint,
+    toEndpoint: secondHandle.endpoint,
+    smoothness: Number(smoothness || 0.35)
+  };
   newRoad.predecessorType = 'road';
-  newRoad.predecessorId = String(first.id);
+  newRoad.predecessorId = String(firstRoad.id);
   newRoad.successorType = 'road';
-  newRoad.successorId = String(second.id);
-  first.successorType = 'road';
-  first.successorId = newRoad.id;
-  second.predecessorType = 'road';
-  second.predecessorId = newRoad.id;
-  clearNativeGeometry(first);
-  clearNativeGeometry(second);
+  newRoad.successorId = String(secondRoad.id);
+  if (firstHandle.endpoint === 'end') {
+    firstRoad.successorType = 'road';
+    firstRoad.successorId = newRoad.id;
+  } else {
+    firstRoad.predecessorType = 'road';
+    firstRoad.predecessorId = newRoad.id;
+  }
+  if (secondHandle.endpoint === 'start') {
+    secondRoad.predecessorType = 'road';
+    secondRoad.predecessorId = newRoad.id;
+  } else {
+    secondRoad.successorType = 'road';
+    secondRoad.successorId = newRoad.id;
+  }
+  clearNativeGeometry(firstRoad);
+  clearNativeGeometry(secondRoad);
   detachImportedSource();
   roads.value.push(newRoad);
   selectedRoadIndex.value = roads.value.length - 1;
   render();
   return true;
+}
+
+function rebuildSelectedConnector() {
+  const road = selectedRoad.value;
+  if (!road?.connectorMeta) return;
+  const fromIdx = roads.value.findIndex((r) => String(r.id) === String(road.connectorMeta.fromRoadId));
+  const toIdx = roads.value.findIndex((r) => String(r.id) === String(road.connectorMeta.toRoadId));
+  if (fromIdx < 0 || toIdx < 0) return;
+  const firstHandle = { roadIdx: fromIdx, endpoint: road.connectorMeta.fromEndpoint };
+  const secondHandle = { roadIdx: toIdx, endpoint: road.connectorMeta.toEndpoint };
+  const built = buildBezierBetweenHandles(firstHandle, secondHandle, connectForm.smoothness);
+  if (!built) return;
+  road.points = built.points;
+  road.length = polylineLength(road.points);
+  road.connectorMeta.smoothness = Number(connectForm.smoothness);
+  clearNativeGeometry(road);
+  detachImportedSource();
+  render();
 }
 
 function getAllHandles() {
@@ -816,7 +946,7 @@ function completeExtend(toPoint) {
 
 function setMode(next) {
   mode.value = next;
-  connectSelection.value = [];
+  connectDraft.value = { first: null, second: null };
   extendDraft.value = null;
   render();
 }
@@ -1058,21 +1188,23 @@ function handleCanvasClick(e) {
     return;
   }
   if (mode.value === 'connect') {
-    const idx = pickRoad(p);
-    if (idx < 0) return;
-    if (!connectSelection.value.length) {
-      connectSelection.value = [idx];
-      selectedRoadIndex.value = idx;
+    const handle = pickHandle(sx, sy);
+    if (!handle) return;
+    if (!connectDraft.value.first) {
+      connectDraft.value.first = { roadIdx: handle.roadIdx, endpoint: handle.endpoint };
+      selectedRoadIndex.value = handle.roadIdx;
       render();
       return;
     }
-    if (connectSelection.value[0] === idx) {
-      connectSelection.value = [];
+    if (connectDraft.value.first.roadIdx === handle.roadIdx
+      && connectDraft.value.first.endpoint === handle.endpoint) {
+      connectDraft.value = { first: null, second: null };
       render();
       return;
     }
-    connectRoadsWithBezier(connectSelection.value[0], idx);
-    connectSelection.value = [];
+    connectDraft.value.second = { roadIdx: handle.roadIdx, endpoint: handle.endpoint };
+    connectRoadsWithBezier(connectDraft.value.first, connectDraft.value.second, connectForm.smoothness);
+    connectDraft.value = { first: null, second: null };
     return;
   }
   if (mode.value === 'extend') {
