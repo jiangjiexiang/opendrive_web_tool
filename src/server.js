@@ -118,7 +118,8 @@ function classifyMapcheckOutput(rawOutput) {
     warnings: uniqWarnings,
     errorCount: uniqErrors.length,
     warningCount: uniqWarnings.length,
-    ok: uniqErrors.length === 0
+    ok: uniqErrors.length === 0,
+    rawOutput: String(rawOutput || '')
   };
 }
 
@@ -224,7 +225,8 @@ function classifyRouteTestOutput(rawOutput) {
     errorCount: summary ? summary.fail : uniqErrors.length,
     warningCount: uniqWarnings.length,
     ok: (summary ? summary.fail : uniqErrors.length) === 0,
-    summary
+    summary,
+    rawOutput: String(rawOutput || '')
   };
 }
 
@@ -358,7 +360,9 @@ const server = http.createServer(async (req, res) => {
         inputLength: xodr.length,
         mapcheckTool: mapcheck.tool || '',
         routeTool: routeTest.tool || '',
-        routeSummary: routeTest.summary || null
+        routeSummary: routeTest.summary || null,
+        mapcheckOutput: mapcheck.rawOutput || '',
+        routeOutput: routeTest.rawOutput || ''
       });
     } catch (error) {
       sendJson(res, 400, { error: String(error.message || error) });

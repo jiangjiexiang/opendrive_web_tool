@@ -10,18 +10,150 @@ function esc(v) {
     .replace(/>/g, '&gt;');
 }
 
-function laneXml(lane, laneWidth) {
+function widthRecordsXml(widthSpec, fallbackWidth) {
+  if (Array.isArray(widthSpec) && widthSpec.length) {
+    return widthSpec.map((record) => (
+      `            <width sOffset="${Number(record.sOffset || 0).toFixed(3)}" a="${Number(record.a || 0).toFixed(3)}" b="${Number(record.b || 0).toFixed(6)}" c="${Number(record.c || 0).toFixed(6)}" d="${Number(record.d || 0).toFixed(6)}"/>`
+    )).join('\n');
+  }
+  return `            <width sOffset="0" a="${Number(fallbackWidth || 3.5).toFixed(3)}" b="0" c="0" d="0"/>`;
+}
+
+function laneLinkXml(linkSpec) {
+  if (!linkSpec || (!linkSpec.predecessor && !linkSpec.successor && linkSpec.predecessor !== 0 && linkSpec.successor !== 0)) {
+    return '';
+  }
+  const out = ['            <link>'];
+  if (linkSpec.predecessor || linkSpec.predecessor === 0) {
+    out.push(`              <predecessor id="${esc(linkSpec.predecessor)}"/>`);
+  }
+  if (linkSpec.successor || linkSpec.successor === 0) {
+    out.push(`              <successor id="${esc(linkSpec.successor)}"/>`);
+  }
+  out.push('            </link>');
+  return out.join('\n');
+}
+
+function laneXml(lane, widthSpec, fallbackWidth, linkSpec) {
+  const laneLink = laneLinkXml(linkSpec);
   return [
     `          <lane id="${lane.id}" type="${esc(lane.type)}" level="false">`,
-    `            <width sOffset="0" a="${Number(laneWidth || 3.5).toFixed(3)}" b="0" c="0" d="0"/>`,
+    laneLink,
+    widthRecordsXml(widthSpec, fallbackWidth),
     '            <roadMark sOffset="0" type="solid" weight="standard" color="standard" width="0.15"/>',
     '          </lane>'
-  ].join('\n');
+  ].filter(Boolean).join('\n');
 }
 
 function num(v, fallback = 0) {
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
+}
+
+function laneCountForRole(road, endpoint, role) {
+  const leftCount = Math.max(0, Number(road?.leftLaneCount || 0));
+  const rightCount = Math.max(0, Number(road?.rightLaneCount || 0));
+  if (role === 'incoming') {
+    return endpoint === 'end' ? rightCount : leftCount;
+  }
+  return endpoint === 'end' ? leftCount : rightCount;
+}
+
+function laneIdForRole(endpoint, role, laneIndex) {
+  const idx = Math.max(1, Number(laneIndex || 1));
+  if (role === 'incoming') {
+    return endpoint === 'end' ? -idx : idx;
+  }
+  return endpoint === 'start' ? -idx : idx;
+}
+
+function mapLaneIndex(laneIdx, fromCount, toCount) {
+  const fromN = Math.max(1, Number(fromCount || 1));
+  const toN = Math.max(1, Number(toCount || 1));
+  if (fromN === 1 || toN === 1) return 1;
+  const t = (laneIdx - 1) / (fromN - 1);
+  return Math.max(1, Math.min(toN, Math.round(1 + t * (toN - 1))));
+}
+
+function addLaneLinks(targetLinks, ownEndpoint, ownRole, otherRoad, otherEndpoint, otherRole, fieldName) {
+  if (!otherRoad) return;
+  const ownCount = laneCountForRole(targetLinks.__road, ownEndpoint, ownRole);
+  const otherCount = laneCountForRole(otherRoad, otherEndpoint, otherRole);
+  if (ownCount <= 0 || otherCount <= 0) return;
+
+  for (let lane = 1; lane <= ownCount; lane += 1) {
+    const otherLane = mapLaneIndex(lane, ownCount, otherCount);
+    const ownLaneId = laneIdForRole(ownEndpoint, ownRole, lane);
+    const otherLaneId = laneIdForRole(otherEndpoint, otherRole, otherLane);
+    const existing = targetLinks[ownLaneId] || {};
+    targetLinks[ownLaneId] = {
+      ...existing,
+      [fieldName]: otherLaneId
+    };
+  }
+}
+
+function inferRoadLaneLinks(road, roadIndex) {
+  if (!road || road.laneLinkSpec) {
+    return road?.laneLinkSpec || {};
+  }
+
+  const laneLinks = { __road: road };
+  const predecessorId = road.predecessorId === undefined || road.predecessorId === null
+    ? ''
+    : String(road.predecessorId).trim();
+  const successorId = road.successorId === undefined || road.successorId === null
+    ? ''
+    : String(road.successorId).trim();
+  const predecessorType = String(road.predecessorType || 'road');
+  const successorType = String(road.successorType || 'road');
+  const predecessorContactPoint = String(road.predecessorContactPoint || 'end');
+  const successorContactPoint = String(road.successorContactPoint || 'start');
+
+  if (predecessorType === 'road' && predecessorId) {
+    addLaneLinks(
+      laneLinks,
+      'start',
+      'outgoing',
+      roadIndex.get(predecessorId),
+      predecessorContactPoint,
+      'outgoing',
+      'predecessor'
+    );
+    addLaneLinks(
+      laneLinks,
+      'start',
+      'incoming',
+      roadIndex.get(predecessorId),
+      predecessorContactPoint,
+      'incoming',
+      'successor'
+    );
+  }
+
+  if (successorType === 'road' && successorId) {
+    addLaneLinks(
+      laneLinks,
+      'end',
+      'outgoing',
+      roadIndex.get(successorId),
+      successorContactPoint,
+      'incoming',
+      'successor'
+    );
+    addLaneLinks(
+      laneLinks,
+      'end',
+      'incoming',
+      roadIndex.get(successorId),
+      successorContactPoint,
+      'outgoing',
+      'predecessor'
+    );
+  }
+
+  delete laneLinks.__road;
+  return laneLinks;
 }
 
 function normalizeGeometry(rawGeometry) {
@@ -37,7 +169,8 @@ function normalizeGeometry(rawGeometry) {
       y: num(g.y, 0),
       hdg: num(g.hdg, 0),
       length: roundedLength,
-      type: g.type || 'line'
+      type: g.type || 'line',
+      curvature: num(g.curvature, 0)
     });
     s += roundedLength;
   }
@@ -47,18 +180,27 @@ function normalizeGeometry(rawGeometry) {
   };
 }
 
-function lanesBlockXml(road) {
-  const lanes = buildLanes(road.leftLaneCount, road.rightLaneCount, road.centerType);
-  const laneWidth = Number(road.laneWidth || 3.5);
-  const leftLaneWidth = Number(road.leftLaneWidth || laneWidth || 3.5);
-  const rightLaneWidth = Number(road.rightLaneWidth || laneWidth || 3.5);
-  const left = lanes.filter((l) => l.side === 1).map((l) => laneXml(l, leftLaneWidth)).join('\n');
-  const center = lanes.filter((l) => l.side === 0).map((l) => laneXml(l, 0)).join('\n');
-  const right = lanes.filter((l) => l.side === -1).map((l) => laneXml(l, rightLaneWidth)).join('\n');
-
+function laneSectionXml(section, road, roadIndex) {
+  const lanes = buildLanes(section.leftLaneCount, section.rightLaneCount, section.centerType);
+  const laneWidth = Number(section.laneWidth || road.laneWidth || 3.5);
+  const leftLaneWidth = Number(section.leftLaneWidth || laneWidth || 3.5);
+  const rightLaneWidth = Number(section.rightLaneWidth || laneWidth || 3.5);
+  const leftWidthRecords = section.leftWidthRecords || road.leftWidthRecords || null;
+  const rightWidthRecords = section.rightWidthRecords || road.rightWidthRecords || null;
+  const inferredLaneLinks = inferRoadLaneLinks(road, roadIndex);
+  const laneLinks = { ...inferredLaneLinks };
+  if (section.laneLinks && typeof section.laneLinks === 'object') {
+    Object.entries(section.laneLinks).forEach(([laneId, linkSpec]) => {
+      const inferred = laneLinks[laneId] || {};
+      laneLinks[laneId] = { ...inferred, ...(linkSpec || {}) };
+    });
+  }
+  const singleSide = (Number(section.leftLaneCount || 0) === 0) !== (Number(section.rightLaneCount || 0) === 0);
+  const left = lanes.filter((l) => l.side === 1).map((l) => laneXml(l, leftWidthRecords, leftLaneWidth, laneLinks[l.id])).join('\n');
+  const center = lanes.filter((l) => l.side === 0).map((l) => laneXml(l, [{ sOffset: 0, a: 0, b: 0, c: 0, d: 0 }], 0, laneLinks[l.id])).join('\n');
+  const right = lanes.filter((l) => l.side === -1).map((l) => laneXml(l, rightWidthRecords, rightLaneWidth, laneLinks[l.id])).join('\n');
   return [
-    '    <lanes>',
-    '      <laneSection s="0" singleSide="false">',
+    `      <laneSection s="${Number(section.s || 0).toFixed(3)}" singleSide="${singleSide ? 'true' : 'false'}">`,
     '        <left>',
     left,
     '        </left>',
@@ -68,7 +210,38 @@ function lanesBlockXml(road) {
     '        <right>',
     right,
     '        </right>',
-    '      </laneSection>',
+    '      </laneSection>'
+  ].join('\n');
+}
+
+function lanesBlockXml(road, roadIndex) {
+  const sections = Array.isArray(road.laneSectionsSpec) && road.laneSectionsSpec.length
+    ? road.laneSectionsSpec
+    : [{
+      s: 0,
+      leftLaneCount: road.leftLaneCount,
+      rightLaneCount: road.rightLaneCount,
+      leftLaneWidth: road.leftLaneWidth,
+      rightLaneWidth: road.rightLaneWidth,
+      centerType: road.centerType || 'none',
+      leftWidthRecords: road.leftWidthRecords || null,
+      rightWidthRecords: road.rightWidthRecords || null
+    }];
+  const normalizedSections = [...sections]
+    .map((section) => ({
+      ...section,
+      s: Number(section.s || 0)
+    }))
+    .sort((a, b) => a.s - b.s);
+
+  return [
+    '    <lanes>',
+    ...(Array.isArray(road.laneOffsetRecords) && road.laneOffsetRecords.length
+      ? road.laneOffsetRecords.map((r) => (
+        `      <laneOffset s="${Number(r.sOffset || 0).toFixed(6)}" a="${Number(r.a || 0).toFixed(6)}" b="${Number(r.b || 0).toFixed(6)}" c="${Number(r.c || 0).toFixed(6)}" d="${Number(r.d || 0).toFixed(6)}"/>`
+      ))
+      : ['      <laneOffset s="0.000000" a="0.000000" b="0.000000" c="0.000000" d="0.000000"/>']),
+    normalizedSections.map((section) => laneSectionXml(section, road, roadIndex)).join('\n'),
     '    </lanes>'
   ].join('\n');
 }
@@ -91,14 +264,53 @@ function geometryXml(road) {
     ].join('\n');
   }
 
-  return geometry.map((g) => [
-    `      <geometry s="${Number(g.s).toFixed(6)}" x="${Number(g.x).toFixed(6)}" y="${Number(g.y).toFixed(6)}" hdg="${Number(g.hdg).toFixed(6)}" length="${Number(g.length).toFixed(6)}">`,
-    '        <line/>',
-    '      </geometry>'
-  ].join('\n')).join('\n');
+  return geometry.map((g) => {
+    const type = String(g.type || 'line').toLowerCase();
+    let geomTag = '        <line/>';
+    if (type === 'arc') {
+      geomTag = `        <arc curvature="${Number(g.curvature || 0).toFixed(12)}"/>`;
+    }
+    return [
+      `      <geometry s="${Number(g.s).toFixed(6)}" x="${Number(g.x).toFixed(6)}" y="${Number(g.y).toFixed(6)}" hdg="${Number(g.hdg).toFixed(6)}" length="${Number(g.length).toFixed(6)}">`,
+      geomTag,
+      '      </geometry>'
+    ].join('\n');
+  }).join('\n');
 }
 
-function roadXml(rawRoad) {
+function junctionXml(junction) {
+  if (junction && typeof junction.rawJunctionXml === 'string' && junction.rawJunctionXml.trim()) {
+    return junction.rawJunctionXml.trim();
+  }
+  const id = String(junction.id);
+  const name = String(junction.name || `junction_${id}`);
+  const connections = Array.isArray(junction.connections) ? junction.connections : [];
+  const vectorJunctionId = String(junction.vectorJunctionId || '').trim();
+  return [
+    `  <junction id="${esc(id)}" name="${esc(name)}">`,
+    connections.map((conn, idx) => {
+      const laneLinks = Array.isArray(conn.laneLinks) ? conn.laneLinks : [];
+      return [
+        `    <connection id="${esc(conn.id ?? idx)}" incomingRoad="${esc(conn.incomingRoad)}" connectingRoad="${esc(conn.connectingRoad)}" contactPoint="${esc(conn.contactPoint || 'start')}">`,
+        laneLinks.map((link) => `      <laneLink from="${esc(link.from)}" to="${esc(link.to)}"/>`).join('\n'),
+        '    </connection>'
+      ].join('\n');
+    }).join('\n'),
+    vectorJunctionId
+      ? [
+        '    <userData>',
+        `      <vectorJunction junctionId="${esc(vectorJunctionId)}"/>`,
+        '    </userData>'
+      ].join('\n')
+      : '',
+    '  </junction>'
+  ].join('\n');
+}
+
+function roadXml(rawRoad, roadIndex) {
+  if (rawRoad && typeof rawRoad.rawRoadXml === 'string' && rawRoad.rawRoadXml.trim()) {
+    return rawRoad.rawRoadXml.trim();
+  }
   const road = { ...rawRoad };
   const sourceGeometry = Array.isArray(road.geometry) && road.geometry.length
     ? road.geometry
@@ -121,17 +333,70 @@ function roadXml(rawRoad) {
   const rid = String(road.id);
   const junction = String(road.junction ?? '-1');
   const length = Number(road.length || 1);
+  const predecessorId = road.predecessorId === undefined || road.predecessorId === null
+    ? ''
+    : String(road.predecessorId).trim();
+  const successorId = road.successorId === undefined || road.successorId === null
+    ? ''
+    : String(road.successorId).trim();
+  const predecessorType = String(road.predecessorType || 'road');
+  const successorType = String(road.successorType || 'road');
+  const predecessorContactPoint = String(road.predecessorContactPoint || 'end');
+  const successorContactPoint = String(road.successorContactPoint || 'start');
+  const linkLines = [];
+  if (predecessorId || successorId) {
+    linkLines.push('    <link>');
+    if (predecessorId) {
+      linkLines.push(
+        `      <predecessor elementType="${esc(predecessorType)}" elementId="${esc(predecessorId)}" contactPoint="${esc(predecessorContactPoint)}"/>`
+      );
+    }
+    if (successorId) {
+      linkLines.push(
+        `      <successor elementType="${esc(successorType)}" elementId="${esc(successorId)}" contactPoint="${esc(successorContactPoint)}"/>`
+      );
+    }
+    linkLines.push('    </link>');
+  }
+
+  const typeRecords = Array.isArray(road.typeRecords) && road.typeRecords.length
+    ? road.typeRecords
+    : [{ s: 0, type: 'town', speedMax: '35', speedUnit: 'mph' }];
+  const elevationRecords = Array.isArray(road.elevationRecords) && road.elevationRecords.length
+    ? road.elevationRecords
+    : [{ s: 0, a: 0, b: 0, c: 0, d: 0 }];
+  const superelevationRecords = Array.isArray(road.superelevationRecords) && road.superelevationRecords.length
+    ? road.superelevationRecords
+    : [{ s: 0, a: 0, b: 0, c: 0, d: 0 }];
+  const shapeRecords = Array.isArray(road.shapeRecords) && road.shapeRecords.length
+    ? road.shapeRecords
+    : [{ s: 0, t: -Number(road.rightLaneWidth || road.laneWidth || 3.5), a: 0, b: 0, c: 0, d: 0 }];
 
   return [
     `  <road name="road_${esc(rid)}" length="${length.toFixed(6)}" id="${esc(rid)}" junction="${esc(junction)}">`,
-    '    <link>',
-    `      <predecessor elementType="${esc(road.predecessorType || 'road')}" elementId="${esc(road.predecessorId ?? rid)}" contactPoint="end"/>`,
-    `      <successor elementType="${esc(road.successorType || 'road')}" elementId="${esc(road.successorId ?? rid)}" contactPoint="start"/>`,
-    '    </link>',
+    ...linkLines,
+    typeRecords.map((t) => [
+      `    <type s="${Number(t.s || 0).toFixed(6)}" type="${esc(t.type || 'town')}">`,
+      `      <speed max="${esc(t.speedMax ?? '35')}" unit="${esc(t.speedUnit || 'mph')}"/>`,
+      '    </type>'
+    ].join('\n')).join('\n'),
     '    <planView>',
     geometryXml(road),
     '    </planView>',
-    lanesBlockXml(road),
+    '    <elevationProfile>',
+    elevationRecords.map((e) => (
+      `      <elevation s="${Number(e.s || 0).toFixed(6)}" a="${Number(e.a || 0).toFixed(6)}" b="${Number(e.b || 0).toFixed(6)}" c="${Number(e.c || 0).toFixed(6)}" d="${Number(e.d || 0).toFixed(6)}"/>`
+    )).join('\n'),
+    '    </elevationProfile>',
+    '    <lateralProfile>',
+    superelevationRecords.map((s) => (
+      `      <superelevation s="${Number(s.s || 0).toFixed(6)}" a="${Number(s.a || 0).toFixed(6)}" b="${Number(s.b || 0).toFixed(6)}" c="${Number(s.c || 0).toFixed(6)}" d="${Number(s.d || 0).toFixed(6)}"/>`
+    )).join('\n'),
+    shapeRecords.map((s) => (
+      `      <shape s="${Number(s.s || 0).toFixed(6)}" t="${Number(s.t || 0).toFixed(6)}" a="${Number(s.a || 0).toFixed(6)}" b="${Number(s.b || 0).toFixed(6)}" c="${Number(s.c || 0).toFixed(6)}" d="${Number(s.d || 0).toFixed(6)}"/>`
+    )).join('\n'),
+    '    </lateralProfile>',
+    lanesBlockXml(road, roadIndex),
     '  </road>'
   ].join('\n');
 }
@@ -139,14 +404,19 @@ function roadXml(rawRoad) {
 function buildXodr(spec) {
   const header = spec.header || {};
   const roads = Array.isArray(spec.roads) ? spec.roads : [];
+  const junctions = Array.isArray(spec.junctions) ? spec.junctions : [];
+  const roadIndex = new Map(roads.map((road) => [String(road.id), road]));
 
-  const headerXml = `  <header revMajor="1" revMinor="4" name="${esc(header.name || 'web_generated_map')}" version="1.00" date="${esc(header.date || new Date().toISOString())}" north="${Number(header.north || 0)}" south="${Number(header.south || 0)}" east="${Number(header.east || 0)}" west="${Number(header.west || 0)}" vendor="${esc(header.vendor || 'opendrive_web_tool')}"/>`;
+  const headerXml = (typeof header.rawHeaderXml === 'string' && header.rawHeaderXml.trim())
+    ? header.rawHeaderXml.trim()
+    : `  <header revMajor="1" revMinor="4" name="${esc(header.name || 'web_generated_map')}" version="1.00" date="${esc(header.date || new Date().toISOString())}" north="${Number(header.north || 0)}" south="${Number(header.south || 0)}" east="${Number(header.east || 0)}" west="${Number(header.west || 0)}" vendor="${esc(header.vendor || 'opendrive_web_tool')}"/>`;
 
   return [
     '<?xml version="1.0" encoding="UTF-8"?>',
     '<OpenDRIVE>',
     headerXml,
-    roads.map(roadXml).join('\n'),
+    roads.map((road) => roadXml(road, roadIndex)).join('\n'),
+    junctions.map(junctionXml).join('\n'),
     '</OpenDRIVE>',
     ''
   ].join('\n');

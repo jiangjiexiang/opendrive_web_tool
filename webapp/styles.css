@@ -431,6 +431,36 @@ code {
   margin-bottom: 0;
 }
 
+.dialog-raw-wrap {
+  margin-top: 12px;
+  display: grid;
+  gap: 10px;
+}
+
+.dialog-raw {
+  border: 1px solid rgba(123, 172, 209, 0.3);
+  border-radius: 10px;
+  background: rgba(7, 18, 29, 0.94);
+  padding: 10px;
+}
+
+.dialog-raw h4 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  color: #dcefff;
+}
+
+.dialog-raw pre {
+  margin: 0;
+  max-height: 240px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+  line-height: 1.45;
+  color: #cfe6fb;
+}
+
 .ok-text {
   color: #8df4c8;
 }

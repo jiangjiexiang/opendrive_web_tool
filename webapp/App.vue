@@ -16,8 +16,7 @@
       </div>
       <div class="toolbar-group">
         <button type="button" @click="runValidate">校验</button>
-        <button type="button" @click="generateXodr">生成XODR</button>
-        <button type="button" @click="downloadXodr">下载</button>
+        <button type="button" @click="generateAndDownloadXodr">生成并下载XODR</button>
         <button type="button" @click="pickXodrFile">导入XODR</button>
         <button type="button" @click="pickBgFile">上传底图</button>
       </div>
@@ -56,14 +55,19 @@
         </div>
       </section>
       <input ref="xodrFileInput" type="file" accept=".xodr,.xml,text/xml,application/xml" class="hidden-file" @change="importXodr" />
-      <input ref="bgFileInput" type="file" accept="image/*" class="hidden-file" @change="uploadBackground" />
+      <input ref="mapYamlFileInput" type="file" accept=".yaml,.yml,text/yaml,text/plain" class="hidden-file" @change="importMapYaml" />
+      <input ref="bgFileInput" type="file" accept="image/*,.pgm,.yaml,.yml,text/yaml,text/plain" multiple class="hidden-file" @change="uploadBackground" />
     </aside>
 
     <section class="viewer center-stage">
       <div ref="canvasWrap" class="canvas-wrap">
         <canvas ref="canvasEl" class="canvas-el" width="1280" height="720" />
       </div>
-      <div class="stage-tip">左键交互，滚轮缩放，空格+拖动平移</div>
+      <div class="stage-tip">
+        左键交互，滚轮缩放，空格+拖动平移
+        | 鼠标: x={{ formatNum(mouseWorld.x, 2) }}, y={{ formatYUp(mouseWorld.y) }}
+        | 原点: x={{ formatNum(bgGeo.originX, 2) }}, y={{ formatYUp(bgGeo.originY) }}, yaw={{ formatNum(bgGeo.yaw, 3) }}
+      </div>
     </section>
 
     <aside class="sidebar right-rail">
@@ -98,7 +102,7 @@
         </div>
       </section>
 
-      <section class="panel">
+      <section v-if="mode === 'junction'" class="panel">
         <h2>自动路口生成</h2>
         <div class="grid2">
           <label>边缘留白(m)
@@ -199,10 +203,12 @@
 
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
+import { parseMapYamlText, parsePgmToDataUrl, rotateVec } from './editorUtils.js';
 
 const canvasEl = ref(null);
 const canvasWrap = ref(null);
 const xodrFileInput = ref(null);
+const mapYamlFileInput = ref(null);
 const bgFileInput = ref(null);
 
 const roads = ref([]);
@@ -213,9 +219,22 @@ const connectDraft = ref({ first: null, second: null });
 const extendDraft = ref(null);
 const junctionDraft = ref({ handles: [] });
 const junctionMeshes = ref([]);
+const junctionSpecs = ref([]);
 const bgImage = ref(null);
+const mouseWorld = reactive({ x: 0, y: 0 });
+const bgGeo = reactive({
+  resolution: 1,
+  originX: 0,
+  originY: 0,
+  yaw: 0,
+  imageWidth: 0,
+  imageHeight: 0
+});
 const lastXodr = ref('');
 const importedXodrText = ref('');
+const importedHeaderXml = ref('');
+const rawRoadXmlById = ref({});
+const rawJunctionXmlById = ref({});
 const suppressDetach = ref(false);
 
 const headerForm = reactive({
@@ -244,7 +263,7 @@ const roadForm = reactive({
 
 const connectForm = reactive({
   smoothness: 0.35,
-  overlap: 1.2
+  overlap: 0
 });
 
 const junctionForm = reactive({
@@ -315,6 +334,11 @@ watch(
 function formatNum(v, digits = 2) {
   const n = Number(v);
   return Number.isFinite(n) ? n.toFixed(digits) : '-';
+}
+
+function formatYUp(v, digits = 2) {
+  const n = Number(v);
+  return Number.isFinite(n) ? (-n).toFixed(digits) : '-';
 }
 
 function getChildrenText(roadId) {
@@ -456,6 +480,9 @@ function solveVirtualIntersection(approaches) {
 function detachImportedSource() {
   if (suppressDetach.value) return;
   importedXodrText.value = '';
+  importedHeaderXml.value = '';
+  rawRoadXmlById.value = {};
+  rawJunctionXmlById.value = {};
 }
 
 function postJson(url, payload) {
@@ -683,6 +710,43 @@ function drawMeterGrid() {
   }
 }
 
+function drawOriginAxes() {
+  if (!ctx || !canvasEl.value) return;
+  const canvas = canvasEl.value;
+  const origin = worldToScreen(0, 0);
+
+  // Y axis (x = 0)
+  if (origin.x >= -2 && origin.x <= canvas.width + 2) {
+    ctx.strokeStyle = 'rgba(255, 132, 132, 0.9)';
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.moveTo(Math.round(origin.x) + 0.5, 0);
+    ctx.lineTo(Math.round(origin.x) + 0.5, canvas.height);
+    ctx.stroke();
+  }
+
+  // X axis (y = 0)
+  if (origin.y >= -2 && origin.y <= canvas.height + 2) {
+    ctx.strokeStyle = 'rgba(120, 200, 255, 0.9)';
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.moveTo(0, Math.round(origin.y) + 0.5);
+    ctx.lineTo(canvas.width, Math.round(origin.y) + 0.5);
+    ctx.stroke();
+  }
+
+  // Origin marker
+  if (origin.x >= -12 && origin.x <= canvas.width + 12 && origin.y >= -12 && origin.y <= canvas.height + 12) {
+    ctx.beginPath();
+    ctx.arc(origin.x, origin.y, 3.6, 0, Math.PI * 2);
+    ctx.fillStyle = '#f7fbff';
+    ctx.fill();
+    ctx.strokeStyle = '#0f141a';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+}
+
 function drawArrowAtWorld(x, y, dirX, dirY, color) {
   const dirLen = Math.hypot(dirX, dirY);
   if (dirLen < 1e-6) return;
@@ -832,9 +896,30 @@ function render() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   drawMeterGrid();
   if (bgImage.value) {
-    const p = worldToScreen(0, 0);
-    ctx.drawImage(bgImage.value, p.x, p.y, bgImage.value.width * view.scale, bgImage.value.height * view.scale);
+    const res = Math.max(1e-6, Number(bgGeo.resolution || 1));
+    const yaw = Number(bgGeo.yaw || 0);
+    const width = Number(bgImage.value.width || bgGeo.imageWidth || 0);
+    const height = Number(bgImage.value.height || bgGeo.imageHeight || 0);
+    const topLeftWorld = vecAdd(
+      { x: Number(bgGeo.originX || 0), y: Number(bgGeo.originY || 0) },
+      rotateVec({ x: 0, y: height * res }, yaw)
+    );
+    const ex = rotateVec({ x: res, y: 0 }, yaw);
+    const ey = rotateVec({ x: 0, y: -res }, yaw);
+    const p = worldToScreen(topLeftWorld.x, topLeftWorld.y);
+    ctx.save();
+    ctx.transform(
+      ex.x * view.scale,
+      ex.y * view.scale,
+      ey.x * view.scale,
+      ey.y * view.scale,
+      p.x,
+      p.y
+    );
+    ctx.drawImage(bgImage.value, 0, 0, width, height);
+    ctx.restore();
   }
+  drawOriginAxes();
   drawJunctionMeshes();
   roads.value.forEach((r, idx) => {
     const sel = idx === selectedRoadIndex.value;
@@ -873,11 +958,35 @@ function resizeCanvas(keepWorldCenter = true) {
 function fitView() {
   if (!canvasEl.value) return;
   if (bgImage.value) {
-    const sx = canvasEl.value.width / bgImage.value.width;
-    const sy = canvasEl.value.height / bgImage.value.height;
-    view.scale = Math.min(sx, sy);
-    view.offsetX = (canvasEl.value.width - bgImage.value.width * view.scale) / 2;
-    view.offsetY = (canvasEl.value.height - bgImage.value.height * view.scale) / 2;
+    const res = Math.max(1e-6, Number(bgGeo.resolution || 1));
+    const yaw = Number(bgGeo.yaw || 0);
+    const width = Number(bgImage.value.width || bgGeo.imageWidth || 0);
+    const height = Number(bgImage.value.height || bgGeo.imageHeight || 0);
+    const origin = { x: Number(bgGeo.originX || 0), y: Number(bgGeo.originY || 0) };
+    const corners = [
+      origin,
+      vecAdd(origin, rotateVec({ x: width * res, y: 0 }, yaw)),
+      vecAdd(origin, rotateVec({ x: width * res, y: height * res }, yaw)),
+      vecAdd(origin, rotateVec({ x: 0, y: height * res }, yaw))
+    ];
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    corners.forEach((p) => {
+      minX = Math.min(minX, p.x);
+      minY = Math.min(minY, p.y);
+      maxX = Math.max(maxX, p.x);
+      maxY = Math.max(maxY, p.y);
+    });
+    const w = Math.max(1, maxX - minX);
+    const h = Math.max(1, maxY - minY);
+    const margin = 40;
+    const sx = (canvasEl.value.width - margin * 2) / w;
+    const sy = (canvasEl.value.height - margin * 2) / h;
+    view.scale = Math.max(0.00001, Math.min(sx, sy));
+    view.offsetX = margin - minX * view.scale + (canvasEl.value.width - margin * 2 - w * view.scale) / 2;
+    view.offsetY = margin - minY * view.scale + (canvasEl.value.height - margin * 2 - h * view.scale) / 2;
   } else if (roads.value.length) {
     let minX = Infinity; let minY = Infinity; let maxX = -Infinity; let maxY = -Infinity;
     roads.value.forEach((r) => {
@@ -899,9 +1008,11 @@ function fitView() {
       view.offsetY = margin - minY * view.scale + (canvasEl.value.height - margin * 2 - h * view.scale) / 2;
     }
   } else {
-    view.scale = 1;
-    view.offsetX = 0;
-    view.offsetY = 0;
+    const defaultSpanM = 100;
+    const shortSidePx = Math.max(1, Math.min(canvasEl.value.width, canvasEl.value.height));
+    view.scale = shortSidePx / defaultSpanM;
+    view.offsetX = canvasEl.value.width / 2;
+    view.offsetY = canvasEl.value.height / 2;
   }
   render();
 }
@@ -950,15 +1061,19 @@ function roadPoseAtEnd(road, atStart) {
   if (pts.length < 2) return null;
   const idx = atStart ? 0 : pts.length - 1;
   const p = pts[idx];
-  let hdg = Number(p.hdg);
+  let hdg;
+  if (atStart) {
+    const p1 = pts[1];
+    hdg = Math.atan2(p1.y - p.y, p1.x - p.x);
+  } else {
+    const p0 = pts[pts.length - 2];
+    hdg = Math.atan2(p.y - p0.y, p.x - p0.x);
+  }
   if (!Number.isFinite(hdg)) {
-    if (atStart) {
-      const p1 = pts[1];
-      hdg = Math.atan2(p1.y - p.y, p1.x - p.x);
-    } else {
-      const p0 = pts[pts.length - 2];
-      hdg = Math.atan2(p.y - p0.y, p.x - p0.x);
-    }
+    hdg = Number(p.hdg);
+  }
+  if (!Number.isFinite(hdg)) {
+    hdg = 0;
   }
   return { x: p.x, y: p.y, hdg };
 }
@@ -992,6 +1107,10 @@ function sampleBezier(p0, p1, p2, p3, segments = 24) {
 
 function nextJunctionId() {
   let maxId = 0;
+  (junctionSpecs.value || []).forEach((j) => {
+    const n = Number.parseInt(j.id, 10);
+    if (Number.isFinite(n)) maxId = Math.max(maxId, n);
+  });
   (junctionMeshes.value || []).forEach((j) => {
     const n = Number.parseInt(j.id, 10);
     if (Number.isFinite(n)) maxId = Math.max(maxId, n);
@@ -1005,6 +1124,79 @@ function mapLaneIndex(laneIdx, fromCount, toCount) {
   if (fromN === 1 || toN === 1) return 1;
   const t = (laneIdx - 1) / (fromN - 1);
   return clamp(Math.round(1 + t * (toN - 1)), 1, toN);
+}
+
+function getApproachLaneId(approach, role, laneIndex) {
+  const idx = Math.max(1, Number(laneIndex || 1));
+  if (role === 'incoming') {
+    return approach.handle.endpoint === 'end' ? -idx : idx;
+  }
+  return approach.handle.endpoint === 'start' ? -idx : idx;
+}
+
+function resolveApproachLaneProfile(approach, preferredRole) {
+  const incomingCount = Math.max(0, Number(approach?.incomingCount || 0));
+  const outgoingCount = Math.max(0, Number(approach?.outgoingCount || 0));
+  const incomingWidth = Math.max(0.5, Number(approach?.incomingWidth || 3.5));
+  const outgoingWidth = Math.max(0.5, Number(approach?.outgoingWidth || 3.5));
+
+  if (preferredRole === 'incoming') {
+    if (incomingCount > 0) return { roleUsed: 'incoming', count: incomingCount, width: incomingWidth, fallbackUsed: false };
+    if (outgoingCount > 0) return { roleUsed: 'outgoing', count: outgoingCount, width: outgoingWidth, fallbackUsed: true };
+    return { roleUsed: 'incoming', count: 1, width: incomingWidth, fallbackUsed: true };
+  }
+
+  if (outgoingCount > 0) return { roleUsed: 'outgoing', count: outgoingCount, width: outgoingWidth, fallbackUsed: false };
+  if (incomingCount > 0) return { roleUsed: 'incoming', count: incomingCount, width: incomingWidth, fallbackUsed: true };
+  return { roleUsed: 'outgoing', count: 1, width: outgoingWidth, fallbackUsed: true };
+}
+
+function buildLaneSectionLinkSpecs(fromApproach, fromProfile, toApproach, toProfile, useLeftLanes) {
+  const fromCount = Math.max(1, Number(fromProfile?.count || 1));
+  const toCount = Math.max(1, Number(toProfile?.count || 1));
+  const fromRoleUsed = fromProfile?.roleUsed || 'incoming';
+  const toRoleUsed = toProfile?.roleUsed || 'outgoing';
+
+  const laneMap = [];
+  for (let lane = 1; lane <= fromCount; lane += 1) {
+    const mapped = mapLaneIndex(lane, fromCount, toCount);
+    laneMap.push({
+      connectorLaneId: useLeftLanes ? lane : -lane,
+      fromRoadLaneId: getApproachLaneId(fromApproach, fromRoleUsed, lane),
+      toRoadLaneId: getApproachLaneId(toApproach, toRoleUsed, mapped),
+      from: lane,
+      to: mapped
+    });
+  }
+
+  const inverseLaneMap = [];
+  for (let lane = 1; lane <= toCount; lane += 1) {
+    const mapped = mapLaneIndex(lane, toCount, fromCount);
+    inverseLaneMap.push({
+      connectorLaneId: useLeftLanes ? lane : -lane,
+      fromRoadLaneId: getApproachLaneId(fromApproach, fromRoleUsed, mapped),
+      toRoadLaneId: getApproachLaneId(toApproach, toRoleUsed, lane),
+      from: mapped,
+      to: lane
+    });
+  }
+
+  const buildLaneLinkObject = (items) => Object.fromEntries(
+    items.map((m) => [m.connectorLaneId, {
+      predecessor: m.fromRoadLaneId,
+      successor: m.toRoadLaneId
+    }])
+  );
+
+  return {
+    laneMap,
+    fromCount,
+    toCount,
+    fromRoleUsed,
+    toRoleUsed,
+    sectionStartLaneLinks: buildLaneLinkObject(laneMap),
+    sectionEndLaneLinks: buildLaneLinkObject(inverseLaneMap)
+  };
 }
 
 function laneCenterOffset(laneIdx, laneCount, laneWidth) {
@@ -1033,10 +1225,10 @@ function collectApproachInfo(handle) {
   const rightLaneCount = Math.max(0, Number(road.rightLaneCount || 0));
   const leftLaneWidth = Math.max(0.5, Number(road.leftLaneWidth || road.laneWidth || 3.5));
   const rightLaneWidth = Math.max(0.5, Number(road.rightLaneWidth || road.laneWidth || 3.5));
-  const incomingCount = handle.endpoint === 'end' ? leftLaneCount : rightLaneCount;
-  const outgoingCount = handle.endpoint === 'end' ? rightLaneCount : leftLaneCount;
-  const incomingWidth = handle.endpoint === 'end' ? leftLaneWidth : rightLaneWidth;
-  const outgoingWidth = handle.endpoint === 'end' ? rightLaneWidth : leftLaneWidth;
+  const incomingCount = handle.endpoint === 'end' ? rightLaneCount : leftLaneCount;
+  const outgoingCount = handle.endpoint === 'end' ? leftLaneCount : rightLaneCount;
+  const incomingWidth = handle.endpoint === 'end' ? rightLaneWidth : leftLaneWidth;
+  const outgoingWidth = handle.endpoint === 'end' ? leftLaneWidth : rightLaneWidth;
   const totalRoadWidth = Math.max(2, leftLaneCount * leftLaneWidth + rightLaneCount * rightLaneWidth);
   return {
     handle: { roadIdx: handle.roadIdx, endpoint: handle.endpoint },
@@ -1056,13 +1248,40 @@ function collectApproachInfo(handle) {
   };
 }
 
+function normalizeConnectorCenterline(points, p0, p3) {
+  const out = [];
+  const source = Array.isArray(points) ? points : [];
+  for (const pt of source) {
+    if (!pt || !Number.isFinite(Number(pt.x)) || !Number.isFinite(Number(pt.y))) continue;
+    const next = { x: Number(pt.x), y: Number(pt.y) };
+    const last = out[out.length - 1];
+    if (!last || Math.hypot(last.x - next.x, last.y - next.y) > 1e-4) {
+      out.push(next);
+    }
+  }
+  if (!out.length) return [{ x: p0.x, y: p0.y }, { x: p3.x, y: p3.y }];
+  out[0] = { x: p0.x, y: p0.y };
+  out[out.length - 1] = { x: p3.x, y: p3.y };
+  if (out.length < 2) out.push({ x: p3.x, y: p3.y });
+  return out;
+}
+
 function buildConnectorCenterline(fromApproach, toApproach, smoothness) {
   const p0 = fromApproach.boundary;
   const p3 = toApproach.boundary;
   const d0 = normalizeVec(fromApproach.incomingDir || fromApproach.dir);
   const d3 = normalizeVec(toApproach.outgoingDir || vecScale(toApproach.dir, -1));
   const minRadius = Math.max(3, Number(fromApproach.halfWidth || 0) + Number(toApproach.halfWidth || 0) + 1.2);
-  return buildBezierWithRadiusGuard(p0, p3, d0, d3, smoothness, minRadius);
+  const directDist = Math.hypot(p3.x - p0.x, p3.y - p0.y);
+  if (directDist <= 1e-6) return [{ x: p0.x, y: p0.y }, { x: p3.x, y: p3.y }];
+  const primary = normalizeConnectorCenterline(
+    buildBezierWithRadiusGuard(p0, p3, d0, d3, smoothness, minRadius),
+    p0,
+    p3
+  );
+  const ratio = polylineLength(primary) / Math.max(1e-6, directDist);
+  if (ratio <= 2.1) return primary;
+  return [{ x: p0.x, y: p0.y }, { x: p3.x, y: p3.y }];
 }
 
 function buildInternalLaneCurve(fromApproach, toApproach, fromLane, toLane, smoothness) {
@@ -1209,6 +1428,18 @@ function generateJunctionFromHandles(handles) {
   }
 
   detachImportedSource();
+  const meshId = nextJunctionId();
+
+  refined.forEach((a) => {
+    a.road.junctionRefId = String(meshId);
+    if (a.handle.endpoint === 'end') {
+      a.road.successorType = 'junction';
+      a.road.successorId = String(meshId);
+    } else {
+      a.road.predecessorType = 'junction';
+      a.road.predecessorId = String(meshId);
+    }
+  });
 
   refined.forEach((a) => {
     extendRoadEndpointToBoundary(a.road, a.handle.endpoint, a.boundary);
@@ -1217,37 +1448,53 @@ function generateJunctionFromHandles(handles) {
   const generatedRoadIds = [];
   const laneCurves = [];
   const connectorMeta = [];
+  const approachCount = refined.length;
+  const expectedConnectorCount = approachCount * Math.max(0, approachCount - 1);
   for (const from of refined) {
-    if (from.incomingCount <= 0) continue;
     for (const to of refined) {
-      if (to === from || to.outgoingCount <= 0) continue;
-      const centerline = buildConnectorCenterline(from, to, junctionForm.smoothness);
-      if (!centerline || centerline.length < 2) continue;
-
-      const transitionType = from.incomingCount === to.outgoingCount
-        ? 'match'
-        : (from.incomingCount > to.outgoingCount ? 'merge' : 'split');
-      const laneMap = [];
-      const fromCount = Math.max(1, Number(from.incomingCount || 1));
-      const toCount = Math.max(1, Number(to.outgoingCount || 1));
-      for (let lane = 1; lane <= fromCount; lane += 1) {
-        const mapped = mapLaneIndex(lane, fromCount, toCount);
-        laneMap.push({ from: lane, to: mapped });
+      if (to === from) continue;
+      let centerline = buildConnectorCenterline(from, to, junctionForm.smoothness);
+      if (!Array.isArray(centerline) || centerline.length < 2) {
+        centerline = [
+          { x: Number(from.boundary?.x ?? from.pose?.x ?? 0), y: Number(from.boundary?.y ?? from.pose?.y ?? 0) },
+          { x: Number(to.boundary?.x ?? to.pose?.x ?? 0), y: Number(to.boundary?.y ?? to.pose?.y ?? 0) }
+        ];
       }
+      const fromProfile = resolveApproachLaneProfile(from, 'incoming');
+      const toProfile = resolveApproachLaneProfile(to, 'outgoing');
+      const transitionType = fromProfile.count === toProfile.count
+        ? 'match'
+        : (fromProfile.count > toProfile.count ? 'merge' : 'split');
+      const useLeftLanes = from.handle.endpoint === 'start';
+      const connectorEntryContactPoint = useLeftLanes ? 'end' : 'start';
+      const {
+        laneMap,
+        fromCount,
+        toCount,
+        fromRoleUsed,
+        toRoleUsed,
+        sectionStartLaneLinks,
+        sectionEndLaneLinks
+      } = buildLaneSectionLinkSpecs(from, fromProfile, to, toProfile, useLeftLanes);
 
       const connectorRoad = defaultRoadFromPoints(centerline);
       connectorRoad.points = centerline;
       connectorRoad.length = polylineLength(centerline);
-      connectorRoad.leftLaneCount = fromCount;
-      connectorRoad.rightLaneCount = 0;
-      connectorRoad.leftLaneWidth = Math.max(0.5, Number(from.incomingWidth || 3.5));
+      connectorRoad.junction = String(meshId);
+      const fromLaneWidth = Math.max(0.5, Number(fromProfile.width || 3.5));
+      const toLaneWidth = Math.max(0.5, Number(toProfile.width || 3.5));
+      connectorRoad.leftLaneCount = useLeftLanes ? fromCount : 0;
+      connectorRoad.rightLaneCount = useLeftLanes ? 0 : fromCount;
+      connectorRoad.leftLaneWidth = fromLaneWidth;
       connectorRoad.rightLaneWidth = connectorRoad.leftLaneWidth;
       connectorRoad.laneWidth = connectorRoad.leftLaneWidth;
-      connectorRoad.centerType = 'none';
+      connectorRoad.centerType = from.centerType || 'none';
       connectorRoad.predecessorType = 'road';
       connectorRoad.predecessorId = String(from.road.id);
+      connectorRoad.predecessorContactPoint = from.handle.endpoint;
       connectorRoad.successorType = 'road';
       connectorRoad.successorId = String(to.road.id);
+      connectorRoad.successorContactPoint = to.handle.endpoint;
       connectorRoad.connectorMeta = {
         kind: 'junction_internal',
         fromRoadId: String(from.road.id),
@@ -1259,11 +1506,61 @@ function generateJunctionFromHandles(handles) {
         type: transitionType,
         fromLaneCount: fromCount,
         toLaneCount: toCount,
-        fromLaneWidth: Number(from.incomingWidth || 3.5),
-        toLaneWidth: Number(to.outgoingWidth || 3.5),
+        fromRoleUsed,
+        toRoleUsed,
+        fromRoleFallback: Boolean(fromProfile.fallbackUsed),
+        toRoleFallback: Boolean(toProfile.fallbackUsed),
+        fromLaneWidth,
+        toLaneWidth,
         transitionLength: Math.max(3, Number(junctionForm.transitionLength || 16)),
         laneMap
       };
+      connectorRoad.leftWidthRecords = [{
+        sOffset: 0,
+        a: fromLaneWidth,
+        b: connectorRoad.length > 1e-6
+          ? (toLaneWidth - fromLaneWidth) / connectorRoad.length
+          : 0,
+        c: 0,
+        d: 0
+      }];
+      connectorRoad.rightWidthRecords = connectorRoad.leftWidthRecords;
+      connectorRoad.laneSectionsSpec = [
+        {
+          s: 0,
+          leftLaneCount: useLeftLanes ? fromCount : 0,
+          rightLaneCount: useLeftLanes ? 0 : fromCount,
+          leftLaneWidth: fromLaneWidth,
+          rightLaneWidth: fromLaneWidth,
+          centerType: 'none',
+          leftWidthRecords: connectorRoad.leftWidthRecords,
+          rightWidthRecords: connectorRoad.rightWidthRecords,
+          laneLinks: sectionStartLaneLinks
+        },
+        {
+          s: Math.max(0, connectorRoad.length * 0.75),
+          leftLaneCount: useLeftLanes ? toCount : 0,
+          rightLaneCount: useLeftLanes ? 0 : toCount,
+          leftLaneWidth: toLaneWidth,
+          rightLaneWidth: toLaneWidth,
+          centerType: 'none',
+          leftWidthRecords: [{
+            sOffset: 0,
+            a: toLaneWidth,
+            b: 0,
+            c: 0,
+            d: 0
+          }],
+          rightWidthRecords: [{
+            sOffset: 0,
+            a: toLaneWidth,
+            b: 0,
+            c: 0,
+            d: 0
+          }],
+          laneLinks: sectionEndLaneLinks
+        }
+      ];
       connectorRoad.internalLaneCurves = laneMap.map((m) => buildInternalLaneCurve(
         from,
         to,
@@ -1279,12 +1576,17 @@ function generateJunctionFromHandles(handles) {
         roadId: String(connectorRoad.id),
         fromRoadId: String(from.road.id),
         toRoadId: String(to.road.id),
-        transition: transitionType
+        entryContactPoint: connectorEntryContactPoint,
+        transition: transitionType,
+        fromRoleUsed,
+        toRoleUsed,
+        fromRoleFallback: Boolean(fromProfile.fallbackUsed),
+        toRoleFallback: Boolean(toProfile.fallbackUsed),
+        laneMap
       });
     }
   }
 
-  const meshId = nextJunctionId();
   junctionMeshes.value.push({
     id: meshId,
     center,
@@ -1298,6 +1600,24 @@ function generateJunctionFromHandles(handles) {
     connectorMeta,
     internalLaneCurves: laneCurves
   });
+  junctionSpecs.value.push({
+    id: String(meshId),
+    name: `junction_${meshId}`,
+    connections: connectorMeta.map((conn, index) => ({
+      id: String(index),
+      incomingRoad: String(conn.fromRoadId),
+      connectingRoad: String(conn.roadId),
+      contactPoint: conn.entryContactPoint || 'start',
+      laneLinks: (conn.laneMap || []).map((link) => ({
+        from: String(link.fromRoadLaneId),
+        to: String(link.connectorLaneId)
+      }))
+    }))
+  });
+
+  if (generatedRoadIds.length !== expectedConnectorCount) {
+    window.alert(`路口连接生成不完整：理论 ${expectedConnectorCount} 条，实际 ${generatedRoadIds.length} 条。`);
+  }
 
   if (generatedRoadIds.length) {
     const lastAddedRoadId = generatedRoadIds[generatedRoadIds.length - 1];
@@ -1329,12 +1649,10 @@ function buildBezierBetweenHandles(firstHandle, secondHandle, smoothness) {
   const overlap = clamp(Number(connectForm.overlap || 0), 0, 6);
   const d0 = endpointDirection(firstHandle.endpoint, p0.hdg);
   const d3 = endpointFinalDirection(secondHandle.endpoint, p3.hdg);
-
-  // Geometry-level stitching: move curve ends slightly into both roads to create physical overlap.
-  const start = { x: p0.x - d0.x * overlap, y: p0.y - d0.y * overlap };
-  const end = { x: p3.x + d3.x * overlap, y: p3.y + d3.y * overlap };
+  const start = { x: p0.x, y: p0.y };
+  const end = { x: p3.x, y: p3.y };
   const dist = Math.hypot(end.x - start.x, end.y - start.y);
-  const handleLen = Math.max(4, Math.min(120, dist * Number(smoothness || 0.35)));
+  const handleLen = Math.max(4, Math.min(120, dist * Number(smoothness || 0.35))) + overlap * 0.25;
   const p1 = { x: start.x + d0.x * handleLen, y: start.y + d0.y * handleLen };
   const p2 = { x: end.x - d3.x * handleLen, y: end.y - d3.y * handleLen };
   const points = sampleBezier(start, p1, p2, end, Math.max(16, Math.ceil(dist / 2)));
@@ -1595,6 +1913,15 @@ function applySelectedRoad() {
 }
 
 function currentSpec() {
+  const roadsForExport = roads.value.map((r) => {
+    const rawRoadXml = rawRoadXmlById.value[String(r.id)] || '';
+    return {
+      ...r,
+      length: polylineLength(r.points),
+      rawRoadXml
+    };
+  });
+  const junctions = junctionsForExport();
   return {
     header: {
       name: headerForm.name,
@@ -1602,9 +1929,11 @@ function currentSpec() {
       north: Number(headerForm.north),
       south: Number(headerForm.south),
       east: Number(headerForm.east),
-      west: Number(headerForm.west)
+      west: Number(headerForm.west),
+      rawHeaderXml: importedHeaderXml.value || undefined
     },
-    roads: roads.value.map((r) => ({ ...r, length: polylineLength(r.points) }))
+    roads: roadsForExport,
+    junctions
   };
 }
 
@@ -1647,15 +1976,46 @@ async function generateXodr() {
   lastXodr.value = xodr;
 }
 
+async function generateAndDownloadXodr() {
+  await generateXodr();
+  downloadXodr();
+}
+
 function downloadXodr() {
-  if (!lastXodr.value) return;
-  const blob = new Blob([lastXodr.value], { type: 'application/xml;charset=utf-8' });
+  const content = lastXodr.value || importedXodrText.value;
+  if (!content) return;
+  const blob = new Blob([content], { type: 'application/xml;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
   a.download = `${headerForm.name || 'map'}.xodr`;
   a.click();
   URL.revokeObjectURL(url);
+}
+
+function junctionsForExport() {
+  const list = [];
+  const used = new Set();
+  (junctionSpecs.value || []).forEach((j) => {
+    const id = String(j?.id ?? '').trim();
+    if (!id) return;
+    used.add(id);
+    list.push({
+      ...j,
+      id,
+      rawJunctionXml: rawJunctionXmlById.value[id] || j.rawJunctionXml || ''
+    });
+  });
+  Object.entries(rawJunctionXmlById.value || {}).forEach(([id, raw]) => {
+    if (used.has(String(id))) return;
+    list.push({
+      id: String(id),
+      name: `junction_${id}`,
+      connections: [],
+      rawJunctionXml: String(raw || '')
+    });
+  });
+  return list;
 }
 
 function applyHeaderFromXodr(xmlText) {
@@ -1667,6 +2027,7 @@ function applyHeaderFromXodr(xmlText) {
   if (!root) throw new Error('不是有效的 OpenDRIVE 文件');
   const header = root.querySelector(':scope > header');
   if (!header) return;
+  importedHeaderXml.value = new XMLSerializer().serializeToString(header);
   headerForm.name = header.getAttribute('name') || headerForm.name;
   headerForm.vendor = header.getAttribute('vendor') || headerForm.vendor;
   if (header.hasAttribute('north')) headerForm.north = Number(header.getAttribute('north'));
@@ -1675,7 +2036,93 @@ function applyHeaderFromXodr(xmlText) {
   if (header.hasAttribute('west')) headerForm.west = Number(header.getAttribute('west'));
 }
 
-function applyNativeRoads(parsedRoads) {
+function parseRoadContactPointsFromXodr(xmlText) {
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(xmlText, 'application/xml');
+  const out = {};
+  doc.querySelectorAll('OpenDRIVE > road').forEach((roadEl) => {
+    const rid = String(roadEl.getAttribute('id') || '').trim();
+    if (!rid) return;
+    const linkEl = roadEl.querySelector(':scope > link');
+    if (!linkEl) return;
+    const pred = linkEl.querySelector(':scope > predecessor');
+    const succ = linkEl.querySelector(':scope > successor');
+    out[rid] = {
+      predecessorContactPoint: pred?.getAttribute('contactPoint') || '',
+      successorContactPoint: succ?.getAttribute('contactPoint') || ''
+    };
+  });
+  return out;
+}
+
+function parseRoadDetailsFromXodr(xmlText) {
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(xmlText, 'application/xml');
+  const roadContact = parseRoadContactPointsFromXodr(xmlText);
+  const rawRoads = {};
+  const details = {};
+  doc.querySelectorAll('OpenDRIVE > road').forEach((roadEl) => {
+    const rid = String(roadEl.getAttribute('id') || '').trim();
+    if (!rid) return;
+    rawRoads[rid] = new XMLSerializer().serializeToString(roadEl);
+    const detail = {
+      predecessorType: 'road',
+      predecessorId: '',
+      predecessorContactPoint: roadContact[rid]?.predecessorContactPoint || 'end',
+      successorType: 'road',
+      successorId: '',
+      successorContactPoint: roadContact[rid]?.successorContactPoint || 'start'
+    };
+    const linkEl = roadEl.querySelector(':scope > link');
+    const pred = linkEl?.querySelector(':scope > predecessor');
+    const succ = linkEl?.querySelector(':scope > successor');
+    if (pred) {
+      detail.predecessorType = pred.getAttribute('elementType') || 'road';
+      detail.predecessorId = pred.getAttribute('elementId') || '';
+      detail.predecessorContactPoint = pred.getAttribute('contactPoint') || detail.predecessorContactPoint;
+    }
+    if (succ) {
+      detail.successorType = succ.getAttribute('elementType') || 'road';
+      detail.successorId = succ.getAttribute('elementId') || '';
+      detail.successorContactPoint = succ.getAttribute('contactPoint') || detail.successorContactPoint;
+    }
+    if (pred != null || succ != null) {
+      details[rid] = detail;
+    }
+  });
+  return { details, rawRoads };
+}
+
+function parseJunctionSpecsFromXodr(xmlText) {
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(xmlText, 'application/xml');
+  const specs = [];
+  const rawById = {};
+  doc.querySelectorAll('OpenDRIVE > junction').forEach((junctionEl) => {
+    const jid = String(junctionEl.getAttribute('id') || '').trim();
+    if (!jid) return;
+    rawById[jid] = new XMLSerializer().serializeToString(junctionEl);
+    const connections = Array.from(junctionEl.querySelectorAll(':scope > connection')).map((connEl, idx) => ({
+      id: String(connEl.getAttribute('id') || idx),
+      incomingRoad: String(connEl.getAttribute('incomingRoad') || ''),
+      connectingRoad: String(connEl.getAttribute('connectingRoad') || ''),
+      contactPoint: String(connEl.getAttribute('contactPoint') || 'start'),
+      laneLinks: Array.from(connEl.querySelectorAll(':scope > laneLink')).map((laneEl) => ({
+        from: String(laneEl.getAttribute('from') || ''),
+        to: String(laneEl.getAttribute('to') || '')
+      }))
+    }));
+    specs.push({
+      id: jid,
+      name: String(junctionEl.getAttribute('name') || `junction_${jid}`),
+      connections,
+      rawJunctionXml: rawById[jid]
+    });
+  });
+  return { specs, rawById };
+}
+
+function applyNativeRoads(parsedRoads, importedJunctions = [], importedRoadDetails = {}) {
   const normalized = (parsedRoads || []).map((r, idx) => ({
     id: String(r.id ?? idx + 1),
     junction: String(r.junction ?? '-1'),
@@ -1687,8 +2134,10 @@ function applyNativeRoads(parsedRoads) {
     centerType: r.centerType || 'none',
     predecessorType: r.predecessorType || 'road',
     predecessorId: String(r.predecessorId ?? r.id ?? idx + 1),
+    predecessorContactPoint: String(r.predecessorContactPoint || 'end'),
     successorType: r.successorType || 'road',
     successorId: String(r.successorId ?? r.id ?? idx + 1),
+    successorContactPoint: String(r.successorContactPoint || 'start'),
     laneOffsetRecords: [{ sOffset: 0, a: 0, b: 0, c: 0, d: 0 }],
     points: Array.isArray(r.points) ? r.points.map((p) => ({ x: Number(p.x), y: Number(p.y), s: Number(p.s), hdg: Number(p.hdg) })) : [],
     nativeLeftBoundary: Array.isArray(r.nativeLeftBoundary) ? r.nativeLeftBoundary.map((p) => ({ x: Number(p.x), y: Number(p.y) })) : [],
@@ -1696,7 +2145,19 @@ function applyNativeRoads(parsedRoads) {
     nativeLaneBoundaries: Array.isArray(r.nativeLaneBoundaries) ? r.nativeLaneBoundaries : [],
     length: Number.isFinite(Number(r.length)) ? Number(r.length) : polylineLength(r.points || [])
   }));
+  normalized.forEach((road) => {
+    const rid = String(road.id);
+    const detail = importedRoadDetails[rid];
+    if (!detail) return;
+    road.predecessorType = detail.predecessorType || road.predecessorType;
+    road.predecessorId = String(detail.predecessorId || road.predecessorId || '');
+    road.predecessorContactPoint = detail.predecessorContactPoint || road.predecessorContactPoint;
+    road.successorType = detail.successorType || road.successorType;
+    road.successorId = String(detail.successorId || road.successorId || '');
+    road.successorContactPoint = detail.successorContactPoint || road.successorContactPoint;
+  });
   roads.value = normalized;
+  junctionSpecs.value = Array.isArray(importedJunctions) ? importedJunctions.map((j) => ({ ...j })) : [];
   drawingPoints.value = [];
   junctionDraft.value = { handles: [] };
   junctionMeshes.value = [];
@@ -1709,6 +2170,10 @@ function pickXodrFile() {
   xodrFileInput.value?.click();
 }
 
+function pickMapYamlFile() {
+  mapYamlFileInput.value?.click();
+}
+
 function pickBgFile() {
   bgFileInput.value?.click();
 }
@@ -1716,35 +2181,90 @@ function pickBgFile() {
 async function importXodr() {
   const file = xodrFileInput.value?.files?.[0];
   if (!file) return;
-  const text = await file.text();
-  suppressDetach.value = true;
-  applyHeaderFromXodr(text);
-  const payload = await postJson('/api/import-xodr-native', { xml: text, eps: 0.2 });
-  applyNativeRoads(payload.roads || []);
-  suppressDetach.value = false;
-  importedXodrText.value = text;
-  xodrFileInput.value.value = '';
+  try {
+    const text = await file.text();
+    suppressDetach.value = true;
+    applyHeaderFromXodr(text);
+    const { details, rawRoads } = parseRoadDetailsFromXodr(text);
+    const { specs: parsedJunctions, rawById } = parseJunctionSpecsFromXodr(text);
+    rawRoadXmlById.value = rawRoads;
+    rawJunctionXmlById.value = rawById;
+    const payload = await postJson('/api/import-xodr-native', { xml: text, eps: 0.2 });
+    applyNativeRoads(payload.roads || [], parsedJunctions, details);
+    importedXodrText.value = text;
+    lastXodr.value = '';
+  } finally {
+    suppressDetach.value = false;
+    xodrFileInput.value.value = '';
+  }
 }
 
-async function uploadBackground() {
-  const file = bgFileInput.value?.files?.[0];
+function applyMapYamlText(text, fallback = {}) {
+  const parsed = parseMapYamlText(text, fallback);
+  bgGeo.resolution = Math.max(1e-6, Number(parsed.resolution || fallback.resolution || 1));
+  bgGeo.originX = Number(parsed.originX || 0);
+  bgGeo.originY = Number(parsed.originY || 0);
+  bgGeo.yaw = Number(parsed.yaw || 0);
+  if (Number(parsed.imageWidth) > 0) bgGeo.imageWidth = Number(parsed.imageWidth);
+  if (Number(parsed.imageHeight) > 0) bgGeo.imageHeight = Number(parsed.imageHeight);
+}
+
+async function importMapYaml() {
+  const file = mapYamlFileInput.value?.files?.[0];
   if (!file) return;
-  const dataUrl = await new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result || ''));
-    reader.onerror = () => reject(new Error('读取图片失败'));
-    reader.readAsDataURL(file);
+  const text = await file.text();
+  applyMapYamlText(text, {
+    imageWidth: bgImage.value?.width || bgGeo.imageWidth || 0,
+    imageHeight: bgImage.value?.height || bgGeo.imageHeight || 0
   });
-  await new Promise((resolve, reject) => {
+  mapYamlFileInput.value.value = '';
+  fitView();
+  render();
+}
+
+function loadBackgroundFromDataUrl(dataUrl) {
+  return new Promise((resolve, reject) => {
     const img = new Image();
     img.onload = () => {
-      bgImage.value = img;
-      fitView();
-      resolve();
+      resolve(img);
     };
     img.onerror = () => reject(new Error('底图加载失败'));
     img.src = dataUrl;
   });
+}
+
+async function uploadBackground() {
+  const files = Array.from(bgFileInput.value?.files || []);
+  if (!files.length) return;
+  for (const file of files) {
+    const lower = String(file.name || '').toLowerCase();
+    if (lower.endsWith('.yaml') || lower.endsWith('.yml')) {
+      const yamlText = await file.text();
+      applyMapYamlText(yamlText, {
+        imageWidth: bgImage.value?.width || bgGeo.imageWidth || 0,
+        imageHeight: bgImage.value?.height || bgGeo.imageHeight || 0
+      });
+      continue;
+    }
+    let dataUrl = '';
+    if (lower.endsWith('.pgm')) {
+      const arr = await file.arrayBuffer();
+      dataUrl = parsePgmToDataUrl(arr);
+    } else {
+      dataUrl = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ''));
+        reader.onerror = () => reject(new Error('读取图片失败'));
+        reader.readAsDataURL(file);
+      });
+    }
+    const img = await loadBackgroundFromDataUrl(dataUrl);
+    bgImage.value = img;
+    bgGeo.imageWidth = Number(img.width || bgGeo.imageWidth || 0);
+    bgGeo.imageHeight = Number(img.height || bgGeo.imageHeight || 0);
+  }
+  fitView();
+  render();
   bgFileInput.value.value = '';
 }
 
@@ -1806,10 +2326,6 @@ function handleCanvasClick(e) {
     }
     junctionDraft.value.handles.push({ roadIdx: handle.roadIdx, endpoint: handle.endpoint });
     selectedRoadIndex.value = handle.roadIdx;
-    if (junctionDraft.value.handles.length === 4) {
-      generateJunctionFromDraft();
-      return;
-    }
     render();
     return;
   }
@@ -1859,6 +2375,11 @@ function handleMouseMove(e) {
     view.offsetX = view.baseOffsetX + (e.clientX - view.panStartX);
     view.offsetY = view.baseOffsetY + (e.clientY - view.panStartY);
     render();
+  }
+  if (canvasEl.value) {
+    const rect = canvasEl.value.getBoundingClientRect();
+    mouseWorld.x = (e.clientX - rect.left - view.offsetX) / view.scale;
+    mouseWorld.y = (e.clientY - rect.top - view.offsetY) / view.scale;
   }
   if (!canvasEl.value || !extendDraft.value || mode.value !== 'extend') return;
   const rect = canvasEl.value.getBoundingClientRect();
