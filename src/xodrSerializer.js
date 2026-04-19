@@ -405,6 +405,7 @@ function buildXodr(spec) {
   const header = spec.header || {};
   const roads = Array.isArray(spec.roads) ? spec.roads : [];
   const junctions = Array.isArray(spec.junctions) ? spec.junctions : [];
+  const rawOpenDriveExtras = Array.isArray(spec.rawOpenDriveExtras) ? spec.rawOpenDriveExtras : [];
   const roadIndex = new Map(roads.map((road) => [String(road.id), road]));
 
   const headerXml = (typeof header.rawHeaderXml === 'string' && header.rawHeaderXml.trim())
@@ -417,6 +418,7 @@ function buildXodr(spec) {
     headerXml,
     roads.map((road) => roadXml(road, roadIndex)).join('\n'),
     junctions.map(junctionXml).join('\n'),
+    rawOpenDriveExtras.map((x) => String(x || '').trim()).filter(Boolean).join('\n'),
     '</OpenDRIVE>',
     ''
   ].join('\n');

@@ -6,6 +6,7 @@ const fs = require('fs');
 const os = require('os');
 const { execFile } = require('child_process');
 const { buildXodr } = require('./xodrSerializer');
+const { generateJunctionFromApproaches } = require('./junctionGenerator');
 
 const publicDir = path.join(__dirname, '..', 'public');
 const distDir = path.join(__dirname, '..', 'dist');
@@ -376,6 +377,18 @@ const server = http.createServer(async (req, res) => {
       const spec = JSON.parse(body || '{}');
       const xodr = buildXodr(spec);
       sendJson(res, 200, { xodr });
+    } catch (error) {
+      sendJson(res, 400, { error: String(error.message || error) });
+    }
+    return;
+  }
+
+  if (req.url === '/api/generate-junction-spec' && req.method === 'POST') {
+    try {
+      const body = await readBody(req);
+      const payload = JSON.parse(body || '{}');
+      const result = generateJunctionFromApproaches(payload || {});
+      sendJson(res, 200, result);
     } catch (error) {
       sendJson(res, 400, { error: String(error.message || error) });
     }
