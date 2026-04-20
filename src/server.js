@@ -7,6 +7,7 @@ const os = require('os');
 const { execFile } = require('child_process');
 const { buildXodr } = require('./xodrSerializer');
 const { generateJunctionFromApproaches } = require('./junctionGenerator');
+const { validateMapSpec, validateRouteConnectivity } = require('./vtsRules');
 
 const publicDir = path.join(__dirname, '..', 'public');
 const distDir = path.join(__dirname, '..', 'dist');
@@ -28,6 +29,7 @@ const routeTestCandidates = [
 ].filter(Boolean);
 const staticDir = fs.existsSync(distDir) ? distDir : publicDir;
 const port = Number(process.env.BACKEND_PORT || process.env.PORT || 5173);
+const validationMode = String(process.env.VALIDATION_MODE || 'auto').trim().toLowerCase();
 
 function sendJson(res, statusCode, payload) {
   res.writeHead(statusCode, {
@@ -190,13 +192,22 @@ function classifyRouteTestOutput(rawOutput) {
     .filter(Boolean);
 
   const errors = [];
+  const fatalPatterns = [
+    /start road has no successor/i,
+    /has no successor/i,
+    /has no predecessor/i,
+    /not enough valid roads/i,
+    /load map failed/i,
+    /route(?:\s|_)*(?:failed|error|not found|no data|empty)/i
+  ];
   let summary = null;
   for (const line of lines) {
-    if (/^\[\s*FAIL\s*\]/i.test(line) || line.toLowerCase().includes('load map failed')) {
+    if (/^\[\s*FAIL\s*\]/i.test(line)) {
       errors.push(line);
       continue;
     }
-    if (line.toLowerCase().includes('not enough valid roads')) {
+    if (fatalPatterns.some((re) => re.test(line))) {
+      errors.push(line);
       continue;
     }
     const match = line.match(/summary:\s*ok=(\d+),\s*fail=(\d+),\s*total=(\d+),\s*sample_fail=(\d+)/i);
@@ -210,12 +221,17 @@ function classifyRouteTestOutput(rawOutput) {
     }
   }
 
-  const errorCount = summary ? summary.fail : errors.length;
+  if (!summary) {
+    errors.push('[ROUTE] route_test summary not found (treated as failure)');
+  } else if (summary.total <= 0) {
+    errors.push('[ROUTE] route_test summary total=0 (no routable samples)');
+  } else if (summary.ok <= 0) {
+    errors.push('[ROUTE] route_test summary ok=0 (no successful routes)');
+  }
+
   const warnings = [];
   if (summary) {
     warnings.push(`[ROUTE] summary: ok=${summary.ok}, fail=${summary.fail}, total=${summary.total}, sample_fail=${summary.sampleFail}`);
-  } else {
-    warnings.push('[ROUTE] route_test executed (summary not found in output)');
   }
 
   const uniqErrors = [...new Set(errors)];
@@ -223,9 +239,9 @@ function classifyRouteTestOutput(rawOutput) {
   return {
     errors: uniqErrors,
     warnings: uniqWarnings,
-    errorCount: summary ? summary.fail : uniqErrors.length,
+    errorCount: uniqErrors.length,
     warningCount: uniqWarnings.length,
-    ok: (summary ? summary.fail : uniqErrors.length) === 0,
+    ok: uniqErrors.length === 0 && (!summary || Number(summary.fail || 0) === 0),
     summary,
     rawOutput: String(rawOutput || '')
   };
@@ -290,6 +306,36 @@ function runRouteTestOnXodr(xodrText) {
   });
 }
 
+function runJsValidation(spec) {
+  const mapcheck = validateMapSpec(spec || {});
+  const route = validateRouteConnectivity(spec || {});
+  return {
+    mapcheck: {
+      ...mapcheck,
+      rawOutput: '[JS] mapcheck fallback',
+      tool: 'js-mapcheck'
+    },
+    route: {
+      ok: Boolean(route.ok),
+      errors: Array.isArray(route.errors) ? route.errors : [],
+      warnings: Array.isArray(route.warnings) ? route.warnings : [],
+      errorCount: Array.isArray(route.errors) ? route.errors.length : 0,
+      warningCount: Array.isArray(route.warnings) ? route.warnings.length : 0,
+      summary: route.summary || null,
+      rawOutput: '[JS] route_test fallback',
+      tool: 'js-route-test'
+    }
+  };
+}
+
+function isToolNotFoundError(err) {
+  const msg = String(err?.message || err || '').toLowerCase();
+  return msg.includes('未找到可用的原版')
+    || msg.includes('enoent')
+    || msg.includes('mapcheck_bin')
+    || msg.includes('maproute_bin');
+}
+
 function serveStatic(req, res) {
   const requested = req.url === '/' ? '/index.html' : req.url;
   const safePath = path.normalize(decodeURIComponent(requested)).replace(/^\.+/, '');
@@ -346,8 +392,28 @@ const server = http.createServer(async (req, res) => {
       const payload = JSON.parse(body || '{}');
       const xodrFromPayload = typeof payload.xodr === 'string' ? payload.xodr.trim() : '';
       const xodr = xodrFromPayload || buildXodr(payload);
-      const mapcheck = await runMapcheckOnXodr(xodr);
-      const routeTest = await runRouteTestOnXodr(xodr);
+      let mapcheck;
+      let routeTest;
+      let modeUsed = validationMode;
+      if (validationMode === 'js') {
+        const js = runJsValidation(payload);
+        mapcheck = js.mapcheck;
+        routeTest = js.route;
+      } else {
+        try {
+          mapcheck = await runMapcheckOnXodr(xodr);
+          routeTest = await runRouteTestOnXodr(xodr);
+          modeUsed = 'native';
+        } catch (error) {
+          if (validationMode === 'native' || !isToolNotFoundError(error)) {
+            throw error;
+          }
+          const js = runJsValidation(payload);
+          mapcheck = js.mapcheck;
+          routeTest = js.route;
+          modeUsed = 'js-fallback';
+        }
+      }
 
       const errors = [...(mapcheck.errors || []), ...(routeTest.errors || [])];
       const warnings = [...(mapcheck.warnings || []), ...(routeTest.warnings || [])];
@@ -359,6 +425,7 @@ const server = http.createServer(async (req, res) => {
         warnings,
         inputMode: xodrFromPayload ? 'raw_xodr' : 'generated_from_spec',
         inputLength: xodr.length,
+        validationMode: modeUsed,
         mapcheckTool: mapcheck.tool || '',
         routeTool: routeTest.tool || '',
         routeSummary: routeTest.summary || null,

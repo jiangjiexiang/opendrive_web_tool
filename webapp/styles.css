@@ -446,6 +446,34 @@ code {
   margin-bottom: 0;
 }
 
+.quality-progress-wrap {
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid rgba(123, 172, 209, 0.38);
+  border-radius: 10px;
+  background: rgba(10, 23, 35, 0.88);
+}
+
+.quality-progress-bar {
+  height: 10px;
+  border-radius: 999px;
+  background: rgba(116, 163, 197, 0.28);
+  overflow: hidden;
+}
+
+.quality-progress-fill {
+  height: 100%;
+  width: 0;
+  background: linear-gradient(90deg, #7ee5c8, #8cbfff);
+  transition: width 0.25s ease;
+}
+
+.quality-progress-text {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: #cfe6fb;
+}
+
 .dialog-raw-wrap {
   margin-top: 12px;
   display: grid;

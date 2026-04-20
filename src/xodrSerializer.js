@@ -204,6 +204,19 @@ function laneSectionXml(section, road, roadIndex) {
       laneLinks[laneId] = { ...inferred, ...(linkSpec || {}) };
     });
   }
+  // Ensure each non-center lane has a complete <link> with predecessor/successor.
+  // When one side cannot be inferred (e.g. junction-boundary road), use same-lane fallback.
+  lanes.forEach((lane) => {
+    if (lane.side === 0) return;
+    const laneId = String(lane.id);
+    const current = laneLinks[laneId] || {};
+    const hasPred = current.predecessor || current.predecessor === 0;
+    const hasSucc = current.successor || current.successor === 0;
+    laneLinks[laneId] = {
+      predecessor: hasPred ? current.predecessor : lane.id,
+      successor: hasSucc ? current.successor : lane.id
+    };
+  });
   const singleSide = (Number(section.leftLaneCount || 0) === 0) !== (Number(section.rightLaneCount || 0) === 0);
   const left = lanes.filter((l) => l.side === 1).map((l) => laneXml(l, leftWidthRecords, leftLaneWidth, laneLinks[l.id])).join('\n');
   const center = lanes.filter((l) => l.side === 0).map((l) => laneXml(l, [{ sOffset: 0, a: 0, b: 0, c: 0, d: 0 }], 0, laneLinks[l.id])).join('\n');

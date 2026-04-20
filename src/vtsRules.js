@@ -215,8 +215,78 @@ function validateMapSpec(spec) {
   };
 }
 
+function isDrivableRoad(road) {
+  return Number(road?.leftLaneCount || 0) > 0 || Number(road?.rightLaneCount || 0) > 0;
+}
+
+function validateRouteConnectivity(spec) {
+  const roads = Array.isArray(spec?.roads) ? spec.roads : [];
+  const roadIndex = new Map();
+  roads.forEach((road) => {
+    roadIndex.set(String(road.id ?? '').trim(), road);
+  });
+
+  const errors = [];
+  const warnings = [];
+  const drivable = roads.filter((r) => isDrivableRoad(r));
+  if (!drivable.length) {
+    return {
+      ok: false,
+      errors: ['[ROUTE] not enough valid roads'],
+      warnings: [],
+      summary: { ok: 0, fail: 1, total: 1, sampleFail: 1 }
+    };
+  }
+
+  let okCount = 0;
+  let failCount = 0;
+  drivable.forEach((road) => {
+    const rid = String(road.id ?? '').trim();
+    const succType = String(road.successorType || '').trim();
+    const succId = String(road.successorId || '').trim();
+    const predType = String(road.predecessorType || '').trim();
+    const predId = String(road.predecessorId || '').trim();
+
+    let bad = false;
+
+    if (!succId) {
+      errors.push(`[ROUTE] start road ${rid} has no successor`);
+      bad = true;
+    } else if (succType === 'road' && !roadIndex.has(succId)) {
+      errors.push(`[ROUTE] road ${rid} successor road ${succId} not found`);
+      bad = true;
+    }
+
+    if (!predId) {
+      errors.push(`[ROUTE] road ${rid} has no predecessor`);
+      bad = true;
+    } else if (predType === 'road' && !roadIndex.has(predId)) {
+      errors.push(`[ROUTE] road ${rid} predecessor road ${predId} not found`);
+      bad = true;
+    }
+
+    if (!bad) okCount += 1;
+    else failCount += 1;
+  });
+
+  warnings.push(`[ROUTE] summary: ok=${okCount}, fail=${failCount}, total=${drivable.length}, sample_fail=${Math.min(10, failCount)}`);
+
+  return {
+    ok: errors.length === 0,
+    errors: [...new Set(errors)],
+    warnings: [...new Set(warnings)],
+    summary: {
+      ok: okCount,
+      fail: failCount,
+      total: drivable.length,
+      sampleFail: Math.min(10, failCount)
+    }
+  };
+}
+
 module.exports = {
   validateMapSpec,
+  validateRouteConnectivity,
   buildLanes,
   polylineLength,
   buildGeometryFromPoints

@@ -13,6 +13,15 @@ import {
   backgroundFileToDataUrl,
   isYamlFile
 } from './backgroundMap.js';
+import { createQualityDialogState, runQualityCheck } from './qualityCheck.js';
+import {
+  createRoadColorState,
+  openRoadColorDialog as openRoadColorDialogAction,
+  closeRoadColorDialog as closeRoadColorDialogAction,
+  applyRoadColorDialog as applyRoadColorDialogAction,
+  resetRoadColorDialogDefaults as resetRoadColorDialogDefaultsAction,
+  getRoadPaletteForRoad as computeRoadPaletteForRoad
+} from './roadColors.js';
 
 export function useAppLogic() {
 const canvasEl = ref(null);
@@ -94,28 +103,8 @@ const junctionForm = reactive({
   transitionLength: 16
 });
 
-const validateDialog = reactive({
-  visible: false,
-  ok: false,
-  errorCount: 0,
-  warningCount: 0,
-  errors: [],
-  warnings: [],
-  routeOk: false,
-  routeStatus: 'NOT_RUN',
-  routeSummary: null,
-  routeOutput: '',
-  mapcheckOutput: ''
-});
-const roadColorDialog = reactive({
-  visible: false,
-  allColor: '#3a92ff',
-  junctionColor: '#ff9b42'
-});
-const roadColorConfig = reactive({
-  allColor: '#3a92ff',
-  junctionColor: '#ff9b42'
-});
+const validateDialog = createQualityDialogState();
+const { roadColorDialog, roadColorConfig } = createRoadColorState();
 
 const view = reactive({
   scale: 1,
@@ -822,55 +811,6 @@ function shouldUseOverviewRoadRendering(visibleRoadCount, visiblePointCount) {
   return view.scale < 0.42 || visibleRoadCount > 900 || visiblePointCount > 50000;
 }
 
-function hexToRgba(hex, alpha) {
-  const h = String(hex || '').trim();
-  const a = Math.max(0, Math.min(1, Number(alpha)));
-  const short = /^#([0-9a-fA-F]{3})$/;
-  const full = /^#([0-9a-fA-F]{6})$/;
-  if (short.test(h)) {
-    const raw = h.slice(1);
-    const r = Number.parseInt(raw[0] + raw[0], 16);
-    const g = Number.parseInt(raw[1] + raw[1], 16);
-    const b = Number.parseInt(raw[2] + raw[2], 16);
-    return `rgba(${r}, ${g}, ${b}, ${a})`;
-  }
-  if (full.test(h)) {
-    const raw = h.slice(1);
-    const r = Number.parseInt(raw.slice(0, 2), 16);
-    const g = Number.parseInt(raw.slice(2, 4), 16);
-    const b = Number.parseInt(raw.slice(4, 6), 16);
-    return `rgba(${r}, ${g}, ${b}, ${a})`;
-  }
-  return '';
-}
-
-function isJunctionRoad(road) {
-  return String(road?.junction ?? '-1') !== '-1';
-}
-
-function getRoadPaletteForRoad(road, selected) {
-  if (selected) {
-    return {
-      fill: DEFAULT_ROAD_RENDER_STYLE.selectedFill,
-      edge: DEFAULT_ROAD_RENDER_STYLE.selectedEdge,
-      lane: DEFAULT_ROAD_RENDER_STYLE.selectedLane,
-      center: DEFAULT_ROAD_RENDER_STYLE.selectedCenter
-    };
-  }
-  const color = isJunctionRoad(road) ? roadColorConfig.junctionColor : roadColorConfig.allColor;
-  const fill = hexToRgba(color, 0.22);
-  const edge = hexToRgba(color, 0.95);
-  const lane = hexToRgba(color, 0.72);
-  const center = hexToRgba(color, 1);
-  if (fill && edge && lane && center) return { fill, edge, lane, center };
-  return {
-    fill: DEFAULT_ROAD_RENDER_STYLE.baseFill,
-    edge: DEFAULT_ROAD_RENDER_STYLE.baseEdge,
-    lane: DEFAULT_ROAD_RENDER_STYLE.baseLane,
-    center: DEFAULT_ROAD_RENDER_STYLE.baseCenter
-  };
-}
-
 function drawRoadSurface(road, selected, renderData = null, options = {}) {
   if (!road.points || road.points.length < 2) return;
   if (options.overview) {
@@ -1220,7 +1160,7 @@ function performRender() {
     const sel = idx === selectedRoadIndex.value;
     const needDetail = !overviewMode || sel || drawArrows || drawLabels;
     const renderData = needDetail ? getRoadRenderData(r) : null;
-    const palette = getRoadPaletteForRoad(r, sel);
+    const palette = computeRoadPaletteForRoad(r, sel, roadColorConfig, DEFAULT_ROAD_RENDER_STYLE);
     drawRoadSurface(r, sel, renderData, {
       overview: overviewMode && !sel,
       allowFallbackCenterline: true,
@@ -1688,10 +1628,18 @@ function buildLaneSectionLinkSpecs(fromApproach, fromProfile, toApproach, toProf
   };
 }
 
-function laneCenterOffset(laneIdx, laneCount, laneWidth) {
-  const n = Math.max(1, Number(laneCount || 1));
+function sideLaneCenterOffset(laneIdx, laneWidth, isLeftSide) {
+  const idx = Math.max(1, Number(laneIdx || 1));
   const w = Math.max(0.5, Number(laneWidth || 3.5));
-  return (laneIdx - (n + 1) / 2) * w;
+  const sign = isLeftSide ? 1 : -1;
+  return sign * ((idx - 0.5) * w);
+}
+
+function approachRoleIsLeft(approach, role) {
+  const endpoint = String(approach?.handle?.endpoint || '');
+  if (role === 'incoming') return endpoint === 'start';
+  if (role === 'outgoing') return endpoint === 'end';
+  return endpoint === 'start';
 }
 
 function orientApproachesToward(approaches, target) {
@@ -1783,9 +1731,25 @@ function buildConnectorCenterline(fromApproach, toApproach, smoothness) {
   };
 }
 
-function buildInternalLaneCurve(fromApproach, toApproach, fromLane, toLane, smoothness) {
-  const startOffset = laneCenterOffset(fromLane, fromApproach.incomingCount, fromApproach.incomingWidth);
-  const endOffset = laneCenterOffset(toLane, toApproach.outgoingCount, toApproach.outgoingWidth);
+function buildInternalLaneCurve(
+  fromApproach,
+  toApproach,
+  fromLane,
+  toLane,
+  smoothness,
+  fromIsLeftSide = true,
+  toIsLeftSide = true,
+  fromLaneWidth = null,
+  toLaneWidth = null
+) {
+  const startWidth = Number.isFinite(Number(fromLaneWidth))
+    ? Number(fromLaneWidth)
+    : Number(fromApproach.incomingWidth || 3.5);
+  const endWidth = Number.isFinite(Number(toLaneWidth))
+    ? Number(toLaneWidth)
+    : Number(toApproach.outgoingWidth || 3.5);
+  const startOffset = sideLaneCenterOffset(fromLane, startWidth, fromIsLeftSide);
+  const endOffset = sideLaneCenterOffset(toLane, endWidth, toIsLeftSide);
   const p0 = vecAdd(fromApproach.boundary, vecScale(fromApproach.incomingNormal || fromApproach.normal, startOffset));
   const p3 = vecAdd(toApproach.boundary, vecScale(toApproach.outgoingNormal || vecScale(toApproach.normal, -1), endOffset));
   const d0 = normalizeVec(fromApproach.incomingDir || fromApproach.dir);
@@ -2010,6 +1974,7 @@ function validateJunctionHandles(handles) {
 function generateJunctionFromHandles(handles) {
   const invalidReason = validateJunctionHandles(handles);
   if (invalidReason) return { ok: false, reason: invalidReason };
+  const preserveSelectedRoads = true;
 
   const approaches = handles.map((h) => collectApproachInfo(h)).filter(Boolean);
   if (approaches.length < 3 || approaches.length > 4) {
@@ -2037,11 +2002,14 @@ function generateJunctionFromHandles(handles) {
     } else {
       advance = 0.8;
     }
-    const boundary = vecAdd(a.pose, vecScale(a.dir, advance));
+    const meshBoundary = vecAdd(a.pose, vecScale(a.dir, advance));
+    const boundary = preserveSelectedRoads
+      ? { x: a.pose.x, y: a.pose.y }
+      : meshBoundary;
     const normal = perpLeft(a.dir);
-    const leftEdge = vecAdd(boundary, vecScale(normal, a.halfWidth));
-    const rightEdge = vecAdd(boundary, vecScale(normal, -a.halfWidth));
-    const radial = normalizeVec(vecSub(boundary, center), vecScale(a.dir, -1));
+    const leftEdge = vecAdd(meshBoundary, vecScale(normal, a.halfWidth));
+    const rightEdge = vecAdd(meshBoundary, vecScale(normal, -a.halfWidth));
+    const radial = normalizeVec(vecSub(meshBoundary, center), vecScale(a.dir, -1));
     return {
       ...a,
       anchor: { x: a.pose.x, y: a.pose.y },
@@ -2058,8 +2026,9 @@ function generateJunctionFromHandles(handles) {
     return { ok: false, reason: '路口生成失败：无法构造有效路口多边形。' };
   }
 
+  const touchedApproachRoadIds = refined.map((a) => String(a.road.id));
   detachImportedSource({
-    roadIds: refined.map((a) => String(a.road?.id || ''))
+    roadIds: touchedApproachRoadIds
   });
   const meshId = nextJunctionId();
 
@@ -2074,15 +2043,16 @@ function generateJunctionFromHandles(handles) {
     }
   });
 
-  refined.forEach((a) => {
-    extendRoadEndpointToBoundary(a.road, a.handle.endpoint, a.boundary);
-  });
+  if (!preserveSelectedRoads) {
+    refined.forEach((a) => {
+      extendRoadEndpointToBoundary(a.road, a.handle.endpoint, a.boundary);
+    });
+  }
 
   const generatedRoadIds = [];
   const laneCurves = [];
   const connectorMeta = [];
-  const approachCount = refined.length;
-  const expectedConnectorCount = approachCount * Math.max(0, approachCount - 1);
+  const directedFlows = [];
   for (const from of refined) {
     for (const to of refined) {
       if (to === from) continue;
@@ -2098,127 +2068,216 @@ function generateJunctionFromHandles(handles) {
       }
       const fromProfile = resolveApproachLaneProfile(from, 'incoming');
       const toProfile = resolveApproachLaneProfile(to, 'outgoing');
-      const transitionType = fromProfile.count === toProfile.count
-        ? 'match'
-        : (fromProfile.count > toProfile.count ? 'merge' : 'split');
-      const useLeftLanes = from.handle.endpoint === 'start';
-      const connectorEntryContactPoint = useLeftLanes ? 'end' : 'start';
-      const {
-        laneMap,
-        fromCount,
-        toCount,
-        fromRoleUsed,
-        toRoleUsed,
-        sectionStartLaneLinks,
-        sectionEndLaneLinks
-      } = buildLaneSectionLinkSpecs(from, fromProfile, to, toProfile, useLeftLanes);
+      directedFlows.push({
+        from,
+        to,
+        centerline,
+        fromProfile,
+        toProfile
+      });
+    }
+  }
 
-      const connectorRoad = createRoadFromPoints(centerline.points, {}, { bezierSegments: centerline.bezierSegments });
-      connectorRoad.junction = String(meshId);
-      const fromLaneWidth = Math.max(0.5, Number(fromProfile.width || 3.5));
-      const toLaneWidth = Math.max(0.5, Number(toProfile.width || 3.5));
-      connectorRoad.leftLaneCount = useLeftLanes ? fromCount : 0;
-      connectorRoad.rightLaneCount = useLeftLanes ? 0 : fromCount;
-      connectorRoad.leftLaneWidth = fromLaneWidth;
-      connectorRoad.rightLaneWidth = connectorRoad.leftLaneWidth;
-      connectorRoad.laneWidth = connectorRoad.leftLaneWidth;
-      connectorRoad.centerType = from.centerType || 'none';
-      connectorRoad.predecessorType = 'road';
-      connectorRoad.predecessorId = String(from.road.id);
-      connectorRoad.predecessorContactPoint = from.handle.endpoint;
-      connectorRoad.successorType = 'road';
-      connectorRoad.successorId = String(to.road.id);
-      connectorRoad.successorContactPoint = to.handle.endpoint;
-      connectorRoad.connectorMeta = {
-        kind: 'junction_internal',
-        fromRoadId: String(from.road.id),
-        toRoadId: String(to.road.id),
-        fromEndpoint: from.handle.endpoint,
-        toEndpoint: to.handle.endpoint
-      };
-      connectorRoad.transitionMeta = {
-        type: transitionType,
-        fromLaneCount: fromCount,
-        toLaneCount: toCount,
-        fromRoleUsed,
-        toRoleUsed,
-        fromRoleFallback: Boolean(fromProfile.fallbackUsed),
-        toRoleFallback: Boolean(toProfile.fallbackUsed),
+  const pairBuckets = new Map();
+  directedFlows.forEach((flow) => {
+    const key = [String(flow.from.road.id), String(flow.to.road.id)].sort().join('::');
+    const list = pairBuckets.get(key) || [];
+    list.push(flow);
+    pairBuckets.set(key, list);
+  });
+  const expectedConnectorCount = pairBuckets.size;
+
+  for (const flows of pairBuckets.values()) {
+    if (!flows.length) continue;
+    let primary = flows[0];
+    let reverse = flows.length > 1 ? flows[1] : null;
+    if (reverse && String(primary.from.road.id) > String(reverse.from.road.id)) {
+      const tmp = primary;
+      primary = reverse;
+      reverse = tmp;
+    }
+
+    const primarySideLeft = approachRoleIsLeft(primary.from, primary.fromProfile.roleUsed);
+    const buildSideSpec = (flow, sideLeft) => {
+      if (!flow) return null;
+      const links = buildLaneSectionLinkSpecs(
+        flow.from,
+        flow.fromProfile,
+        flow.to,
+        flow.toProfile,
+        sideLeft
+      );
+      const fromLaneWidth = Math.max(0.5, Number(flow.fromProfile.width || 3.5));
+      const toLaneWidth = Math.max(0.5, Number(flow.toProfile.width || 3.5));
+      return {
+        flow,
+        sideLeft,
+        links,
         fromLaneWidth,
         toLaneWidth,
-        transitionLength: Math.max(3, Number(junctionForm.transitionLength || 16)),
-        laneMap
+        transitionType: links.fromCount === links.toCount
+          ? 'match'
+          : (links.fromCount > links.toCount ? 'merge' : 'split')
       };
-      connectorRoad.leftWidthRecords = [{
-        sOffset: 0,
-        a: fromLaneWidth,
-        b: connectorRoad.length > 1e-6
-          ? (toLaneWidth - fromLaneWidth) / connectorRoad.length
-          : 0,
-        c: 0,
-        d: 0
-      }];
-      connectorRoad.rightWidthRecords = connectorRoad.leftWidthRecords;
+    };
+
+    const leftSpec = primarySideLeft
+      ? buildSideSpec(primary, true)
+      : buildSideSpec(reverse, true);
+    const rightSpec = primarySideLeft
+      ? buildSideSpec(reverse, false)
+      : buildSideSpec(primary, false);
+
+    const connectorRoad = createRoadFromPoints(
+      primary.centerline.points,
+      {},
+      { bezierSegments: primary.centerline.bezierSegments }
+    );
+    connectorRoad.junction = String(meshId);
+    const leftStartCount = leftSpec ? leftSpec.links.fromCount : 0;
+    const rightStartCount = rightSpec ? rightSpec.links.fromCount : 0;
+    const leftEndCount = leftSpec ? leftSpec.links.toCount : leftStartCount;
+    const rightEndCount = rightSpec ? rightSpec.links.toCount : rightStartCount;
+    const leftStartWidth = leftSpec ? leftSpec.fromLaneWidth : 3.5;
+    const rightStartWidth = rightSpec ? rightSpec.fromLaneWidth : 3.5;
+    const leftEndWidth = leftSpec ? leftSpec.toLaneWidth : leftStartWidth;
+    const rightEndWidth = rightSpec ? rightSpec.toLaneWidth : rightStartWidth;
+    const mergeLaneLinks = (...objects) => Object.assign({}, ...objects.filter(Boolean));
+    const sectionStartLaneLinks = mergeLaneLinks(
+      leftSpec?.links?.sectionStartLaneLinks,
+      rightSpec?.links?.sectionStartLaneLinks
+    );
+    const sectionEndLaneLinks = mergeLaneLinks(
+      leftSpec?.links?.sectionEndLaneLinks,
+      rightSpec?.links?.sectionEndLaneLinks
+    );
+    const leftWidthRecords = [{
+      sOffset: 0,
+      a: leftStartWidth,
+      b: connectorRoad.length > 1e-6 ? (leftEndWidth - leftStartWidth) / connectorRoad.length : 0,
+      c: 0,
+      d: 0
+    }];
+    const rightWidthRecords = [{
+      sOffset: 0,
+      a: rightStartWidth,
+      b: connectorRoad.length > 1e-6 ? (rightEndWidth - rightStartWidth) / connectorRoad.length : 0,
+      c: 0,
+      d: 0
+    }];
+
+    connectorRoad.leftLaneCount = leftStartCount;
+    connectorRoad.rightLaneCount = rightStartCount;
+    connectorRoad.leftLaneWidth = leftStartWidth;
+    connectorRoad.rightLaneWidth = rightStartWidth;
+    connectorRoad.laneWidth = (leftStartWidth + rightStartWidth) * 0.5;
+    connectorRoad.centerType = primary.from.centerType || 'none';
+    connectorRoad.predecessorType = 'road';
+    connectorRoad.predecessorId = String(primary.from.road.id);
+    connectorRoad.predecessorContactPoint = primary.from.handle.endpoint;
+    connectorRoad.successorType = 'road';
+    connectorRoad.successorId = String(primary.to.road.id);
+    connectorRoad.successorContactPoint = primary.to.handle.endpoint;
+    connectorRoad.connectorMeta = {
+      kind: 'junction_internal',
+      bidirectional: Boolean(reverse),
+      fromRoadId: String(primary.from.road.id),
+      toRoadId: String(primary.to.road.id),
+      fromEndpoint: primary.from.handle.endpoint,
+      toEndpoint: primary.to.handle.endpoint
+    };
+    connectorRoad.leftWidthRecords = leftWidthRecords;
+    connectorRoad.rightWidthRecords = rightWidthRecords;
+    const noLaneTransition = leftStartCount === leftEndCount
+      && rightStartCount === rightEndCount
+      && Math.abs(leftStartWidth - leftEndWidth) < 1e-6
+      && Math.abs(rightStartWidth - rightEndWidth) < 1e-6;
+    if (noLaneTransition) {
       connectorRoad.laneSectionsSpec = [
         {
           s: 0,
-          leftLaneCount: useLeftLanes ? fromCount : 0,
-          rightLaneCount: useLeftLanes ? 0 : fromCount,
-          leftLaneWidth: fromLaneWidth,
-          rightLaneWidth: fromLaneWidth,
+          leftLaneCount: leftStartCount,
+          rightLaneCount: rightStartCount,
+          leftLaneWidth: leftStartWidth,
+          rightLaneWidth: rightStartWidth,
           centerType: 'none',
-          leftWidthRecords: connectorRoad.leftWidthRecords,
-          rightWidthRecords: connectorRoad.rightWidthRecords,
+          leftWidthRecords: [{ sOffset: 0, a: leftStartWidth, b: 0, c: 0, d: 0 }],
+          rightWidthRecords: [{ sOffset: 0, a: rightStartWidth, b: 0, c: 0, d: 0 }],
+          laneLinks: sectionStartLaneLinks
+        }
+      ];
+    } else {
+      connectorRoad.laneSectionsSpec = [
+        {
+          s: 0,
+          leftLaneCount: leftStartCount,
+          rightLaneCount: rightStartCount,
+          leftLaneWidth: leftStartWidth,
+          rightLaneWidth: rightStartWidth,
+          centerType: 'none',
+          leftWidthRecords,
+          rightWidthRecords,
           laneLinks: sectionStartLaneLinks
         },
         {
           s: Math.max(0, connectorRoad.length * 0.75),
-          leftLaneCount: useLeftLanes ? toCount : 0,
-          rightLaneCount: useLeftLanes ? 0 : toCount,
-          leftLaneWidth: toLaneWidth,
-          rightLaneWidth: toLaneWidth,
+          leftLaneCount: leftEndCount,
+          rightLaneCount: rightEndCount,
+          leftLaneWidth: leftEndWidth,
+          rightLaneWidth: rightEndWidth,
           centerType: 'none',
-          leftWidthRecords: [{
-            sOffset: 0,
-            a: toLaneWidth,
-            b: 0,
-            c: 0,
-            d: 0
-          }],
-          rightWidthRecords: [{
-            sOffset: 0,
-            a: toLaneWidth,
-            b: 0,
-            c: 0,
-            d: 0
-          }],
+          leftWidthRecords: [{ sOffset: 0, a: leftEndWidth, b: 0, c: 0, d: 0 }],
+          rightWidthRecords: [{ sOffset: 0, a: rightEndWidth, b: 0, c: 0, d: 0 }],
           laneLinks: sectionEndLaneLinks
         }
       ];
-      connectorRoad.internalLaneCurves = laneMap.map((m) => buildInternalLaneCurve(
-        from,
-        to,
-        m.from,
-        m.to,
-        junctionForm.smoothness
-      ));
-      connectorRoad.internalLaneCurves.forEach((curve) => laneCurves.push(curve));
-      clearNativeGeometry(connectorRoad);
-      roads.value.push(connectorRoad);
-      generatedRoadIds.push(String(connectorRoad.id));
+    }
+
+    const roadLaneCurves = [];
+    const appendLaneCurves = (spec) => {
+      if (!spec) return;
+      const fromLaneSideIsLeft = approachRoleIsLeft(spec.flow.from, spec.links.fromRoleUsed);
+      const toLaneSideIsLeft = approachRoleIsLeft(spec.flow.to, spec.links.toRoleUsed);
+      spec.links.laneMap.forEach((m) => {
+        roadLaneCurves.push(buildInternalLaneCurve(
+          spec.flow.from,
+          spec.flow.to,
+          m.from,
+          m.to,
+          junctionForm.smoothness,
+          fromLaneSideIsLeft,
+          toLaneSideIsLeft,
+          spec.fromLaneWidth,
+          spec.toLaneWidth
+        ));
+      });
+    };
+    appendLaneCurves(leftSpec);
+    appendLaneCurves(rightSpec);
+    connectorRoad.internalLaneCurves = roadLaneCurves;
+    roadLaneCurves.forEach((curve) => laneCurves.push(curve));
+
+    clearNativeGeometry(connectorRoad);
+    roads.value.push(connectorRoad);
+    generatedRoadIds.push(String(connectorRoad.id));
+
+    const pushConnectionMeta = (spec) => {
+      if (!spec) return;
       connectorMeta.push({
         roadId: String(connectorRoad.id),
-        fromRoadId: String(from.road.id),
-        toRoadId: String(to.road.id),
-        entryContactPoint: connectorEntryContactPoint,
-        transition: transitionType,
-        fromRoleUsed,
-        toRoleUsed,
-        fromRoleFallback: Boolean(fromProfile.fallbackUsed),
-        toRoleFallback: Boolean(toProfile.fallbackUsed),
-        laneMap
+        fromRoadId: String(spec.flow.from.road.id),
+        toRoadId: String(spec.flow.to.road.id),
+        entryContactPoint: spec.sideLeft ? 'end' : 'start',
+        transition: spec.transitionType,
+        fromRoleUsed: spec.links.fromRoleUsed,
+        toRoleUsed: spec.links.toRoleUsed,
+        fromRoleFallback: Boolean(spec.flow.fromProfile.fallbackUsed),
+        toRoleFallback: Boolean(spec.flow.toProfile.fallbackUsed),
+        laneMap: spec.links.laneMap
       });
-    }
+    };
+    pushConnectionMeta(leftSpec);
+    pushConnectionMeta(rightSpec);
   }
 
   junctionMeshes.value.push({
@@ -2654,41 +2713,12 @@ function currentSpec() {
 }
 
 async function runValidate() {
-  try {
-    const payload = currentSpec();
-    if (importedXodrText.value) {
-      payload.xodr = importedXodrText.value;
-    }
-    const result = await postJson('/api/validate', payload);
-    validateDialog.visible = true;
-    validateDialog.ok = Boolean(result.ok);
-    validateDialog.errorCount = Number(result.errorCount || 0);
-    validateDialog.warningCount = Number(result.warningCount || 0);
-    validateDialog.errors = Array.isArray(result.errors) ? result.errors : [];
-    validateDialog.warnings = Array.isArray(result.warnings) ? result.warnings : [];
-    validateDialog.routeSummary = result.routeSummary || null;
-    validateDialog.routeOutput = String(result.routeOutput || '');
-    validateDialog.mapcheckOutput = String(result.mapcheckOutput || '');
-    if (validateDialog.routeSummary) {
-      validateDialog.routeOk = Number(validateDialog.routeSummary.fail || 0) === 0;
-      validateDialog.routeStatus = validateDialog.routeOk ? 'PASS' : 'FAIL';
-    } else {
-      validateDialog.routeOk = false;
-      validateDialog.routeStatus = 'NO_SUMMARY';
-    }
-  } catch (err) {
-    validateDialog.visible = true;
-    validateDialog.ok = false;
-    validateDialog.errorCount = 1;
-    validateDialog.warningCount = 0;
-    validateDialog.errors = [String(err.message || err)];
-    validateDialog.warnings = [];
-    validateDialog.routeOk = false;
-    validateDialog.routeStatus = 'ERROR';
-    validateDialog.routeSummary = null;
-    validateDialog.routeOutput = '';
-    validateDialog.mapcheckOutput = '';
-  }
+  await runQualityCheck({
+    postJson,
+    currentSpec,
+    importedXodrTextRef: importedXodrText,
+    dialog: validateDialog
+  });
 }
 
 async function generateXodr() {
@@ -2716,9 +2746,15 @@ function downloadXodr() {
 function junctionsForExport() {
   const list = [];
   const used = new Set();
+  const referencedByRoads = new Set(
+    roads.value
+      .map((r) => String(r?.junction ?? '').trim())
+      .filter((id) => id && id !== '-1')
+  );
   (junctionSpecs.value || []).forEach((j) => {
     const id = String(j?.id ?? '').trim();
     if (!id) return;
+    if (referencedByRoads.size && !referencedByRoads.has(id)) return;
     used.add(id);
     list.push({
       ...j,
@@ -2727,10 +2763,12 @@ function junctionsForExport() {
     });
   });
   Object.entries(rawJunctionXmlById.value || {}).forEach(([id, raw]) => {
-    if (used.has(String(id))) return;
+    const sid = String(id);
+    if (used.has(sid)) return;
+    if (referencedByRoads.size && !referencedByRoads.has(sid)) return;
     list.push({
-      id: String(id),
-      name: `junction_${id}`,
+      id: sid,
+      name: `junction_${sid}`,
       connections: [],
       rawJunctionXml: String(raw || '')
     });
@@ -3103,25 +3141,20 @@ function handleRoadListScroll(e) {
 }
 
 function openRoadColorDialog() {
-  roadColorDialog.allColor = roadColorConfig.allColor;
-  roadColorDialog.junctionColor = roadColorConfig.junctionColor;
-  roadColorDialog.visible = true;
+  openRoadColorDialogAction(roadColorDialog, roadColorConfig);
 }
 
 function closeRoadColorDialog() {
-  roadColorDialog.visible = false;
+  closeRoadColorDialogAction(roadColorDialog);
 }
 
 function applyRoadColorDialog() {
-  roadColorConfig.allColor = roadColorDialog.allColor;
-  roadColorConfig.junctionColor = roadColorDialog.junctionColor;
-  roadColorDialog.visible = false;
+  applyRoadColorDialogAction(roadColorDialog, roadColorConfig);
   render(true);
 }
 
 function resetRoadColorDialogDefaults() {
-  roadColorDialog.allColor = '#3a92ff';
-  roadColorDialog.junctionColor = '#ff9b42';
+  resetRoadColorDialogDefaultsAction(roadColorDialog);
   render(true);
 }
 

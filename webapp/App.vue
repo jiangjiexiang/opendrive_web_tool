@@ -15,7 +15,7 @@
         <button type="button" @click="fitView">适配视图</button>
       </div>
       <div class="toolbar-group">
-        <button type="button" @click="runValidate">校验</button>
+        <button type="button" @click="runValidate">质检</button>
         <button type="button" @click="generateAndDownloadXodr">生成并下载XODR</button>
         <button type="button" @click="pickXodrFile">导入XODR</button>
         <button type="button" @click="pickBgFile">上传底图</button>
@@ -230,39 +230,48 @@
     <div v-if="validateDialog.visible" class="dialog-mask" @click.self="validateDialog.visible = false">
       <div class="dialog">
         <div class="dialog-head">
-          <h3>校验结果</h3>
+          <h3>质检结果</h3>
           <button type="button" class="dialog-close" @click="validateDialog.visible = false">关闭</button>
         </div>
-        <p class="dialog-status">
-          status:
-          <b :class="validateDialog.ok ? 'ok-text' : 'err-text'">{{ validateDialog.ok ? 'PASS' : 'FAIL' }}</b>
-          | error: <b class="err-text">{{ validateDialog.errorCount }}</b>
-          | warning: <b class="warn-text">{{ validateDialog.warningCount }}</b>
-        </p>
-        <p class="dialog-status">
-          route_test:
-          <b :class="validateDialog.routeOk ? 'ok-text' : 'err-text'">{{ validateDialog.routeStatus }}</b>
-          <template v-if="validateDialog.routeSummary">
-            | ok: <b class="ok-text">{{ validateDialog.routeSummary.ok }}</b>
-            | fail: <b class="err-text">{{ validateDialog.routeSummary.fail }}</b>
-            | total: <b>{{ validateDialog.routeSummary.total }}</b>
-            | sample_fail: <b>{{ validateDialog.routeSummary.sampleFail }}</b>
-          </template>
-        </p>
-        <div class="dialog-list">
-          <p v-if="!validateDialog.errors.length && !validateDialog.warnings.length">没有错误或警告</p>
-          <template v-else>
-            <p v-for="(e, i) in validateDialog.errors" :key="`e-${i}`" class="err-text">[ERROR] {{ e }}</p>
-            <p v-for="(w, i) in validateDialog.warnings" :key="`w-${i}`" class="warn-text">[WARN] {{ w }}</p>
-          </template>
-          <details style="margin-top: 12px;">
-            <summary>route_test 过程日志</summary>
-            <pre style="white-space: pre-wrap; margin-top: 8px;">{{ validateDialog.routeOutput || '(无 route_test 输出)' }}</pre>
-          </details>
-          <details style="margin-top: 8px;">
-            <summary>mapcheck 过程日志</summary>
-            <pre style="white-space: pre-wrap; margin-top: 8px;">{{ validateDialog.mapcheckOutput || '(无 mapcheck 输出)' }}</pre>
-          </details>
+        <div v-if="validateDialog.checking" class="quality-progress-wrap">
+          <p class="dialog-status">正在进行质检，请稍候...</p>
+          <div class="quality-progress-bar">
+            <div class="quality-progress-fill" :style="{ width: `${validateDialog.progress}%` }"></div>
+          </div>
+          <p class="quality-progress-text">{{ validateDialog.progressText }}（{{ Math.floor(validateDialog.progress) }}%）</p>
+        </div>
+        <div v-else>
+          <p class="dialog-status">
+            status:
+            <b :class="validateDialog.ok ? 'ok-text' : 'err-text'">{{ validateDialog.ok ? 'PASS' : 'FAIL' }}</b>
+            | error: <b class="err-text">{{ validateDialog.errorCount }}</b>
+            | warning: <b class="warn-text">{{ validateDialog.warningCount }}</b>
+          </p>
+          <p class="dialog-status">
+            route_test:
+            <b :class="validateDialog.routeOk ? 'ok-text' : 'err-text'">{{ validateDialog.routeStatus }}</b>
+            <template v-if="validateDialog.routeSummary">
+              | ok: <b class="ok-text">{{ validateDialog.routeSummary.ok }}</b>
+              | fail: <b class="err-text">{{ validateDialog.routeSummary.fail }}</b>
+              | total: <b>{{ validateDialog.routeSummary.total }}</b>
+              | sample_fail: <b>{{ validateDialog.routeSummary.sampleFail }}</b>
+            </template>
+          </p>
+          <div class="dialog-list">
+            <p v-if="!validateDialog.errors.length && !validateDialog.warnings.length">没有错误或警告</p>
+            <template v-else>
+              <p v-for="(e, i) in validateDialog.errors" :key="`e-${i}`" class="err-text">[ERROR] {{ e }}</p>
+              <p v-for="(w, i) in validateDialog.warnings" :key="`w-${i}`" class="warn-text">[WARN] {{ w }}</p>
+            </template>
+            <details style="margin-top: 12px;">
+              <summary>route_test 过程日志</summary>
+              <pre style="white-space: pre-wrap; margin-top: 8px;">{{ validateDialog.routeOutput || '(无 route_test 输出)' }}</pre>
+            </details>
+            <details style="margin-top: 8px;">
+              <summary>mapcheck 过程日志</summary>
+              <pre style="white-space: pre-wrap; margin-top: 8px;">{{ validateDialog.mapcheckOutput || '(无 mapcheck 输出)' }}</pre>
+            </details>
+          </div>
         </div>
       </div>
     </div>
