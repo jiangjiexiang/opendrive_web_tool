@@ -1,4 +1,4 @@
-function parseXodrDoc(xmlText) {
+export function parseXodrDoc(xmlText) {
   const parser = new DOMParser();
   const doc = parser.parseFromString(String(xmlText || ''), 'application/xml');
   const parserErr = doc.querySelector('parsererror');
@@ -8,8 +8,15 @@ function parseXodrDoc(xmlText) {
   return { doc, root };
 }
 
-export function parseHeaderFromXodr(xmlText) {
-  const { root } = parseXodrDoc(xmlText);
+function resolveXodrContext(source) {
+  if (source && typeof source === 'object' && source.doc && source.root) {
+    return source;
+  }
+  return parseXodrDoc(source);
+}
+
+export function parseHeaderFromXodr(source) {
+  const { root } = resolveXodrContext(source);
   const header = root.querySelector(':scope > header');
   if (!header) {
     return {
@@ -33,8 +40,8 @@ export function parseHeaderFromXodr(xmlText) {
   };
 }
 
-export function parseRoadContactPointsFromXodr(xmlText) {
-  const { doc } = parseXodrDoc(xmlText);
+export function parseRoadContactPointsFromXodr(source) {
+  const { doc } = resolveXodrContext(source);
   const out = {};
   doc.querySelectorAll('OpenDRIVE > road').forEach((roadEl) => {
     const rid = String(roadEl.getAttribute('id') || '').trim();
@@ -51,9 +58,10 @@ export function parseRoadContactPointsFromXodr(xmlText) {
   return out;
 }
 
-export function parseRoadDetailsFromXodr(xmlText) {
-  const { doc } = parseXodrDoc(xmlText);
-  const roadContact = parseRoadContactPointsFromXodr(xmlText);
+export function parseRoadDetailsFromXodr(source) {
+  const context = resolveXodrContext(source);
+  const { doc } = context;
+  const roadContact = parseRoadContactPointsFromXodr(context);
   const rawRoads = {};
   const details = {};
   doc.querySelectorAll('OpenDRIVE > road').forEach((roadEl) => {
@@ -88,8 +96,8 @@ export function parseRoadDetailsFromXodr(xmlText) {
   return { details, rawRoads };
 }
 
-export function parseJunctionSpecsFromXodr(xmlText) {
-  const { doc } = parseXodrDoc(xmlText);
+export function parseJunctionSpecsFromXodr(source) {
+  const { doc } = resolveXodrContext(source);
   const specs = [];
   const rawById = {};
   doc.querySelectorAll('OpenDRIVE > junction').forEach((junctionEl) => {
@@ -116,8 +124,8 @@ export function parseJunctionSpecsFromXodr(xmlText) {
   return { specs, rawById };
 }
 
-export function parseOpenDriveExtrasFromXodr(xmlText) {
-  const { root } = parseXodrDoc(xmlText);
+export function parseOpenDriveExtrasFromXodr(source) {
+  const { root } = resolveXodrContext(source);
   const serializer = new XMLSerializer();
   const extras = [];
   Array.from(root.children).forEach((child) => {
@@ -126,4 +134,14 @@ export function parseOpenDriveExtrasFromXodr(xmlText) {
     extras.push(serializer.serializeToString(child));
   });
   return extras;
+}
+
+export function parseXodrImportBundle(xmlText) {
+  const context = parseXodrDoc(xmlText);
+  return {
+    header: parseHeaderFromXodr(context),
+    roadDetails: parseRoadDetailsFromXodr(context),
+    junctions: parseJunctionSpecsFromXodr(context),
+    extras: parseOpenDriveExtrasFromXodr(context)
+  };
 }

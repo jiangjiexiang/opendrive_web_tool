@@ -19,6 +19,7 @@
         <button type="button" @click="generateAndDownloadXodr">生成并下载XODR</button>
         <button type="button" @click="pickXodrFile">导入XODR</button>
         <button type="button" @click="pickBgFile">上传底图</button>
+        <button type="button" @click="openRoadColorDialog">道路颜色</button>
       </div>
     </header>
 
@@ -27,30 +28,48 @@
       <p class="desc">左侧道路区</p>
       <section class="panel road-panel">
         <h2>Roads ({{ roads.length }})</h2>
-        <div class="road-list road-list-fill">
-          <div v-for="(road, i) in roads" :key="`${road.id}-${i}`" class="road-tree-item">
+        <div ref="roadListEl" class="road-list road-list-fill" @scroll="handleRoadListScroll">
+          <template v-if="useVirtualRoadList">
+            <div class="road-list-spacer" :style="{ height: `${roadListTopPadding}px` }"></div>
             <button
+              v-for="row in virtualRoadRows"
+              :key="`vroad-${row.road?.id}-${row.index}`"
               type="button"
-              class="road-item"
-              :class="{ selected: i === selectedRoadIndex }"
-              @click="selectRoad(i)"
+              class="road-item road-item-compact"
+              :class="{ selected: row.index === selectedRoadIndex }"
+              @click="selectRoad(row.index)"
             >
-              <div>Road {{ road.id }} | len={{ formatNum(road.length, 2) }} | pts={{ road.points.length }}</div>
-              <div class="meta">pred={{ road.predecessorId || '-' }} | succ={{ road.successorId || '-' }}</div>
+              <div>Road {{ row.road.id }} | len={{ formatNum(row.road.length, 2) }} | pts={{ row.road.points.length }}</div>
+              <div class="meta">pred={{ row.road.predecessorId || '-' }} | succ={{ row.road.successorId || '-' }}</div>
             </button>
-            <div v-if="getChildRoadEntries(road.id).length" class="child-road-list">
+            <div class="road-list-spacer" :style="{ height: `${roadListBottomPadding}px` }"></div>
+            <div class="meta road-list-hint">大地图模式：已启用虚拟列表，仅渲染可见道路项。</div>
+          </template>
+          <template v-else>
+            <div v-for="(road, i) in roads" :key="`${road.id}-${i}`" class="road-tree-item">
               <button
-                v-for="child in getChildRoadEntries(road.id)"
-                :key="`child-${road.id}-${child.index}`"
                 type="button"
-                class="child-road-item"
-                :class="{ selected: child.index === selectedRoadIndex }"
-                @click="selectRoad(child.index)"
+                class="road-item"
+                :class="{ selected: i === selectedRoadIndex }"
+                @click="selectRoad(i)"
               >
-                ↳ Road {{ child.road.id }} | len={{ formatNum(child.road.length, 2) }} | pts={{ child.road.points.length }}
+                <div>Road {{ road.id }} | len={{ formatNum(road.length, 2) }} | pts={{ road.points.length }}</div>
+                <div class="meta">pred={{ road.predecessorId || '-' }} | succ={{ road.successorId || '-' }}</div>
               </button>
+              <div v-if="getChildRoadEntries(road.id).length" class="child-road-list">
+                <button
+                  v-for="child in getChildRoadEntries(road.id)"
+                  :key="`child-${road.id}-${child.index}`"
+                  type="button"
+                  class="child-road-item"
+                  :class="{ selected: child.index === selectedRoadIndex }"
+                  @click="selectRoad(child.index)"
+                >
+                  ↳ Road {{ child.road.id }} | len={{ formatNum(child.road.length, 2) }} | pts={{ child.road.points.length }}
+                </button>
+              </div>
             </div>
-          </div>
+          </template>
           <div v-if="!roads.length" class="empty">暂无道路</div>
         </div>
       </section>
@@ -64,7 +83,7 @@
         <canvas ref="canvasEl" class="canvas-el" width="1280" height="720" />
       </div>
       <div class="stage-tip">
-        左键交互，滚轮缩放，空格+拖动平移
+        左键交互，滚轮缩放，空格+拖动平移，选择模式可拖当前道路控制点
         | 鼠标: x={{ formatNum(mouseWorld.x, 2) }}, y={{ formatYUp(mouseWorld.y) }}
         | 原点: x={{ formatNum(bgGeo.originX, 2) }}, y={{ formatYUp(bgGeo.originY) }}, yaw={{ formatNum(bgGeo.yaw, 3) }}
       </div>
@@ -81,6 +100,25 @@
           <label>south<input v-model.number="headerForm.south" type="number" /></label>
           <label>east<input v-model.number="headerForm.east" type="number" /></label>
           <label>west<input v-model.number="headerForm.west" type="number" /></label>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>绘制优化</h2>
+        <div class="grid2">
+          <label style="grid-column: 1 / -1;">道路平滑度
+            <input v-model.number="drawForm.smoothing" type="range" min="0.1" max="0.95" step="0.01" />
+          </label>
+          <label>数值<input v-model.number="drawForm.smoothing" type="number" min="0.1" max="0.95" step="0.01" /></label>
+          <label style="display:flex; align-items:center; gap:8px; padding-top:22px;">
+            <input v-model="drawForm.autoJunction" type="checkbox" />
+            相交自动生成路口
+          </label>
+          <label style="display:flex; align-items:center; gap:8px; padding-top:22px;">
+            <input v-model="renderOptions.showRoadLabels" type="checkbox" />
+            显示道路编号
+          </label>
+          <div style="grid-column: 1 / -1;" class="meta">绘制完成后会把折线平滑成可导出的曲线，并在简单十字相交场景下自动拆分道路后生成 junction。</div>
         </div>
       </section>
 
@@ -167,6 +205,28 @@
       </section>
     </aside>
 
+    <div v-if="roadColorDialog.visible" class="dialog-mask" @click.self="closeRoadColorDialog">
+      <div class="dialog" style="max-width: 420px;">
+        <div class="dialog-head">
+          <h3>道路颜色设置</h3>
+          <button type="button" class="dialog-close" @click="closeRoadColorDialog">关闭</button>
+        </div>
+        <div class="grid2" style="margin-top: 8px;">
+          <label>全部道路颜色
+            <input v-model="roadColorDialog.allColor" type="color" />
+          </label>
+          <label>Junction道路颜色
+            <input v-model="roadColorDialog.junctionColor" type="color" />
+          </label>
+          <div style="grid-column: 1 / -1;" class="meta">应用后：普通道路和 junction 道路会按两种颜色渲染。</div>
+          <div class="row" style="grid-column: 1 / -1; margin-top: 6px;">
+            <button type="button" @click="applyRoadColorDialog">应用</button>
+            <button type="button" @click="resetRoadColorDialogDefaults">恢复默认</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div v-if="validateDialog.visible" class="dialog-mask" @click.self="validateDialog.visible = false">
       <div class="dialog">
         <div class="dialog-head">
@@ -223,11 +283,18 @@ const {
   generateAndDownloadXodr,
   pickXodrFile,
   pickBgFile,
+  openRoadColorDialog,
   roads,
   selectedRoadIndex,
   formatNum,
   getChildRoadEntries,
   selectRoad,
+  roadListEl,
+  handleRoadListScroll,
+  useVirtualRoadList,
+  virtualRoadRows,
+  roadListTopPadding,
+  roadListBottomPadding,
   xodrFileInput,
   mapYamlFileInput,
   bgFileInput,
@@ -239,7 +306,13 @@ const {
   mouseWorld,
   formatYUp,
   bgGeo,
+  renderOptions,
+  roadColorDialog,
+  closeRoadColorDialog,
+  applyRoadColorDialog,
+  resetRoadColorDialogDefaults,
   headerForm,
+  drawForm,
   connectForm,
   connectDraft,
   getConnectHandleText,

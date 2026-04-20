@@ -170,7 +170,16 @@ function normalizeGeometry(rawGeometry) {
       hdg: num(g.hdg, 0),
       length: roundedLength,
       type: g.type || 'line',
-      curvature: num(g.curvature, 0)
+      curvature: num(g.curvature, 0),
+      pRange: g.pRange || 'normalized',
+      aU: num(g.aU, 0),
+      bU: num(g.bU, 0),
+      cU: num(g.cU, 0),
+      dU: num(g.dU, 0),
+      aV: num(g.aV, 0),
+      bV: num(g.bV, 0),
+      cV: num(g.cV, 0),
+      dV: num(g.dV, 0)
     });
     s += roundedLength;
   }
@@ -269,6 +278,8 @@ function geometryXml(road) {
     let geomTag = '        <line/>';
     if (type === 'arc') {
       geomTag = `        <arc curvature="${Number(g.curvature || 0).toFixed(12)}"/>`;
+    } else if (type === 'parampoly3') {
+      geomTag = `        <paramPoly3 aU="${Number(g.aU || 0).toFixed(12)}" bU="${Number(g.bU || 0).toFixed(12)}" cU="${Number(g.cU || 0).toFixed(12)}" dU="${Number(g.dU || 0).toFixed(12)}" aV="${Number(g.aV || 0).toFixed(12)}" bV="${Number(g.bV || 0).toFixed(12)}" cV="${Number(g.cV || 0).toFixed(12)}" dV="${Number(g.dV || 0).toFixed(12)}" pRange="${esc(g.pRange || 'normalized')}"/>`;
     }
     return [
       `      <geometry s="${Number(g.s).toFixed(6)}" x="${Number(g.x).toFixed(6)}" y="${Number(g.y).toFixed(6)}" hdg="${Number(g.hdg).toFixed(6)}" length="${Number(g.length).toFixed(6)}">`,

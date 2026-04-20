@@ -4,7 +4,8 @@ import {
   parseHeaderFromXodr,
   parseRoadDetailsFromXodr,
   parseJunctionSpecsFromXodr,
-  parseOpenDriveExtrasFromXodr
+  parseOpenDriveExtrasFromXodr,
+  parseXodrImportBundle
 } from './xodrParsers.js';
 import {
   applyMapYamlToGeo,
@@ -16,6 +17,7 @@ import {
 export function useAppLogic() {
 const canvasEl = ref(null);
 const canvasWrap = ref(null);
+const roadListEl = ref(null);
 const xodrFileInput = ref(null);
 const mapYamlFileInput = ref(null);
 const bgFileInput = ref(null);
@@ -81,6 +83,11 @@ const connectForm = reactive({
   overlap: 0
 });
 
+const drawForm = reactive({
+  smoothing: 0.55,
+  autoJunction: true
+});
+
 const junctionForm = reactive({
   edgePadding: 6,
   smoothness: 0.34,
@@ -100,6 +107,15 @@ const validateDialog = reactive({
   routeOutput: '',
   mapcheckOutput: ''
 });
+const roadColorDialog = reactive({
+  visible: false,
+  allColor: '#3a92ff',
+  junctionColor: '#ff9b42'
+});
+const roadColorConfig = reactive({
+  allColor: '#3a92ff',
+  junctionColor: '#ff9b42'
+});
 
 const view = reactive({
   scale: 1,
@@ -112,14 +128,71 @@ const view = reactive({
   baseOffsetY: 0,
   spaceDown: false
 });
+const renderOptions = reactive({
+  showRoadLabels: true
+});
 
 const GRID_BASE_M = 0.1;
 const GRID_TARGET_PX = 9;
+const ROAD_RENDER_CACHE = Symbol('roadRenderCache');
+const ROAD_BOUNDS_CACHE = Symbol('roadBoundsCache');
+const ROAD_LIST_ROW_HEIGHT = 56;
+const ROAD_LIST_OVERSCAN = 8;
 
 let ctx = null;
 let resizeObserver = null;
+let roadListResizeObserver = null;
+let renderFrame = 0;
+const roadListScrollTop = ref(0);
+const roadListViewportHeight = ref(320);
 
 const selectedRoad = computed(() => roads.value[selectedRoadIndex.value] || null);
+const useVirtualRoadList = computed(() => roads.value.length >= 500);
+const roadListWindowCount = computed(() => {
+  const base = Math.ceil(Math.max(120, roadListViewportHeight.value) / ROAD_LIST_ROW_HEIGHT);
+  return base + ROAD_LIST_OVERSCAN * 2;
+});
+const roadListStartIndex = computed(() => {
+  if (!useVirtualRoadList.value) return 0;
+  return Math.max(0, Math.floor(roadListScrollTop.value / ROAD_LIST_ROW_HEIGHT) - ROAD_LIST_OVERSCAN);
+});
+const roadListEndIndex = computed(() => {
+  if (!useVirtualRoadList.value) return roads.value.length;
+  return Math.min(roads.value.length, roadListStartIndex.value + roadListWindowCount.value);
+});
+const virtualRoadRows = computed(() => {
+  if (!useVirtualRoadList.value) return [];
+  const out = [];
+  for (let i = roadListStartIndex.value; i < roadListEndIndex.value; i += 1) {
+    out.push({ index: i, road: roads.value[i] });
+  }
+  return out;
+});
+const roadListTopPadding = computed(() => {
+  if (!useVirtualRoadList.value) return 0;
+  return roadListStartIndex.value * ROAD_LIST_ROW_HEIGHT;
+});
+const roadListBottomPadding = computed(() => {
+  if (!useVirtualRoadList.value) return 0;
+  return Math.max(0, (roads.value.length - roadListEndIndex.value) * ROAD_LIST_ROW_HEIGHT);
+});
+const childRoadEntriesByParent = computed(() => {
+  const map = Object.create(null);
+  roads.value.forEach((r, index) => {
+    const rid = String(r.id ?? '');
+    const predId = String(r.predecessorId || '');
+    const succId = String(r.successorId || '');
+    if (predId && predId !== rid) {
+      if (!map[predId]) map[predId] = [];
+      map[predId].push({ road: r, index });
+    }
+    if (succId && succId !== rid && succId !== predId) {
+      if (!map[succId]) map[succId] = [];
+      map[succId].push({ road: r, index });
+    }
+  });
+  return map;
+});
 
 watch(selectedRoad, (road) => {
   if (!road) return;
@@ -171,16 +244,7 @@ function getChildrenText(roadId) {
 }
 
 function getChildRoadEntries(roadId) {
-  const out = [];
-  roads.value.forEach((r, index) => {
-    if (String(r.id) === String(roadId)) return;
-    const linkedByPred = String(r.predecessorId || '') === String(roadId);
-    const linkedBySucc = String(r.successorId || '') === String(roadId);
-    if (linkedByPred || linkedBySucc) {
-      out.push({ road: r, index });
-    }
-  });
-  return out;
+  return childRoadEntriesByParent.value[String(roadId)] || [];
 }
 
 function getConnectHandleText(handle) {
@@ -361,16 +425,68 @@ function distPointToSeg(p, a, b) {
   return Math.hypot(p.x - px, p.y - py);
 }
 
+function distPointToPolyline(p, points) {
+  if (!Array.isArray(points) || points.length < 2) return Infinity;
+  let best = Infinity;
+  for (let i = 1; i < points.length; i += 1) {
+    const d = distPointToSeg(p, points[i - 1], points[i]);
+    if (d < best) best = d;
+  }
+  return best;
+}
+
+function isPointInPolygon(point, polygon) {
+  if (!Array.isArray(polygon) || polygon.length < 3) return false;
+  let inside = false;
+  const px = Number(point.x);
+  const py = Number(point.y);
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i, i += 1) {
+    const xi = Number(polygon[i].x);
+    const yi = Number(polygon[i].y);
+    const xj = Number(polygon[j].x);
+    const yj = Number(polygon[j].y);
+    const intersect = ((yi > py) !== (yj > py))
+      && (px < ((xj - xi) * (py - yi)) / ((yj - yi) || 1e-12) + xi);
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+
 function pickRoad(worldPoint) {
-  let best = { idx: -1, d: Infinity };
+  let best = { idx: -1, score: Infinity };
+  const nearMargin = 30 / Math.max(0.1, view.scale);
   roads.value.forEach((r, idx) => {
     if (!r.points || r.points.length < 2) return;
-    for (let i = 1; i < r.points.length; i += 1) {
-      const d = distPointToSeg(worldPoint, r.points[i - 1], r.points[i]);
-      if (d < best.d) best = { idx, d };
+    const bounds = getRoadBounds(r);
+    if (bounds) {
+      if (worldPoint.x < bounds.minX - nearMargin || worldPoint.x > bounds.maxX + nearMargin
+        || worldPoint.y < bounds.minY - nearMargin || worldPoint.y > bounds.maxY + nearMargin) {
+        return;
+      }
     }
+    const renderData = getRoadRenderData(r);
+    const centerLine = renderData?.centerRef?.length > 1 ? renderData.centerRef : r.points;
+    const centerDist = distPointToPolyline(worldPoint, centerLine);
+    const leftLaneCount = Math.max(0, Number(r.leftLaneCount || 0));
+    const rightLaneCount = Math.max(0, Number(r.rightLaneCount || 0));
+    const leftLaneWidth = Math.max(0.5, Number(r.leftLaneWidth || r.laneWidth || 3.5));
+    const rightLaneWidth = Math.max(0.5, Number(r.rightLaneWidth || r.laneWidth || 3.5));
+    const halfWidth = Math.max(1.8, leftLaneCount * leftLaneWidth * 0.5 + rightLaneCount * rightLaneWidth * 0.5);
+    const clickPadding = 14 / Math.max(0.1, view.scale);
+    let score = centerDist - (halfWidth + clickPadding);
+
+    const leftPath = renderData?.leftBoundary || [];
+    const rightPath = renderData?.rightBoundary || [];
+    if (leftPath.length > 2 && rightPath.length > 2) {
+      const bandPolygon = leftPath.concat([...rightPath].reverse());
+      if (isPointInPolygon(worldPoint, bandPolygon)) {
+        score = -2;
+      }
+    }
+
+    if (score < best.score) best = { idx, score };
   });
-  return best.d <= 14 / view.scale ? best.idx : -1;
+  return best.score <= 0 ? best.idx : -1;
 }
 
 function drawPolyline(points, color, width, dashed = false, showPoints = false) {
@@ -466,35 +582,361 @@ function drawFilledBand(leftPath, rightPath, fillStyle) {
   ctx.fill();
 }
 
-function drawRoadSurface(road, selected) {
-  if (!road.points || road.points.length < 2) return;
-  if (Array.isArray(road.nativeLeftBoundary) && road.nativeLeftBoundary.length > 1 &&
-      Array.isArray(road.nativeRightBoundary) && road.nativeRightBoundary.length > 1) {
-    drawFilledBand(road.nativeLeftBoundary, road.nativeRightBoundary, selected ? '#6b7280' : '#4b5563');
-    drawPolyline(road.nativeLeftBoundary, '#dce4ef', 1.6);
-    drawPolyline(road.nativeRightBoundary, '#dce4ef', 1.6);
-    (road.nativeLaneBoundaries || []).forEach((lane) => {
-      if (lane?.points?.length > 1) drawPolyline(lane.points, '#eef3f9', 1, true);
+const DEFAULT_ROAD_RENDER_STYLE = {
+  baseFill: 'rgba(58, 146, 255, 0.2)',
+  baseEdge: 'rgba(182, 226, 255, 0.9)',
+  baseLane: 'rgba(219, 241, 255, 0.82)',
+  baseCenter: 'rgba(120, 208, 255, 0.95)',
+  selectedFill: 'rgba(0, 214, 255, 0.55)',
+  selectedEdge: 'rgba(244, 253, 255, 1)',
+  selectedLane: 'rgba(222, 247, 255, 0.96)',
+  selectedCenter: 'rgba(255, 244, 138, 1)'
+};
+
+function readRoadRenderCache(road) {
+  return road?.[ROAD_RENDER_CACHE] || null;
+}
+
+function writeRoadRenderCache(road, cache) {
+  Object.defineProperty(road, ROAD_RENDER_CACHE, {
+    value: cache,
+    writable: true,
+    configurable: true
+  });
+}
+
+function readRoadBoundsCache(road) {
+  return road?.[ROAD_BOUNDS_CACHE] || null;
+}
+
+function writeRoadBoundsCache(road, cache) {
+  Object.defineProperty(road, ROAD_BOUNDS_CACHE, {
+    value: cache,
+    writable: true,
+    configurable: true
+  });
+}
+
+function getRoadBounds(road) {
+  if (!road) return null;
+  const cache = readRoadBoundsCache(road);
+  const pointsRef = road.points;
+  const nativeLeftBoundaryRef = road.nativeLeftBoundary;
+  const nativeRightBoundaryRef = road.nativeRightBoundary;
+  const unchanged = cache
+    && cache.pointsRef === pointsRef
+    && cache.nativeLeftBoundaryRef === nativeLeftBoundaryRef
+    && cache.nativeRightBoundaryRef === nativeRightBoundaryRef;
+  if (unchanged) return cache.bounds;
+
+  const bounds = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity };
+  appendPointsBounds(bounds, pointsRef || []);
+  appendPointsBounds(bounds, nativeLeftBoundaryRef || []);
+  appendPointsBounds(bounds, nativeRightBoundaryRef || []);
+  const finalized = finalizeBounds(bounds, pointsRef || []);
+  writeRoadBoundsCache(road, {
+    pointsRef,
+    nativeLeftBoundaryRef,
+    nativeRightBoundaryRef,
+    bounds: finalized
+  });
+  return finalized;
+}
+
+function appendPointsBounds(bounds, points) {
+  (points || []).forEach((pt) => {
+    const x = Number(pt?.x);
+    const y = Number(pt?.y);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+    bounds.minX = Math.min(bounds.minX, x);
+    bounds.minY = Math.min(bounds.minY, y);
+    bounds.maxX = Math.max(bounds.maxX, x);
+    bounds.maxY = Math.max(bounds.maxY, y);
+  });
+}
+
+function finalizeBounds(bounds, fallbackPoints = []) {
+  if (Number.isFinite(bounds.minX) && Number.isFinite(bounds.minY)
+    && Number.isFinite(bounds.maxX) && Number.isFinite(bounds.maxY)) {
+    return bounds;
+  }
+  const next = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity };
+  appendPointsBounds(next, fallbackPoints);
+  if (!Number.isFinite(next.minX) || !Number.isFinite(next.minY)
+    || !Number.isFinite(next.maxX) || !Number.isFinite(next.maxY)) {
+    return null;
+  }
+  return next;
+}
+
+function buildArrowSeries(path, forward) {
+  if (!path || path.length < 2) return [];
+  let total = 0;
+  const segments = [];
+  for (let i = 1; i < path.length; i += 1) {
+    const a = path[i - 1];
+    const b = path[i];
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const len = Math.hypot(dx, dy);
+    if (len < 1e-6) continue;
+    segments.push({ a, dx, dy, len, start: total, end: total + len });
+    total += len;
+  }
+  if (!segments.length || total < 1e-6) return [];
+  const count = Math.max(1, Math.min(24, Math.floor(total / 55)));
+  const out = [];
+  let segIdx = 0;
+  for (let k = 1; k <= count; k += 1) {
+    const d = (k * total) / (count + 1);
+    while (segIdx < segments.length - 1 && d > segments[segIdx].end) segIdx += 1;
+    const seg = segments[segIdx];
+    const t = Math.max(0, Math.min(1, (d - seg.start) / seg.len));
+    out.push({
+      x: seg.a.x + seg.dx * t,
+      y: seg.a.y + seg.dy * t,
+      dirX: forward ? seg.dx : -seg.dx,
+      dirY: forward ? seg.dy : -seg.dy
     });
-    drawPolyline(road.points, selected ? '#ffd089' : '#8fd8ff', 1.2, true);
+  }
+  return out;
+}
+
+function getPolylineMidpoint(points) {
+  if (!Array.isArray(points) || !points.length) return null;
+  if (points.length === 1) return points[0];
+  let total = 0;
+  const segments = [];
+  for (let i = 1; i < points.length; i += 1) {
+    const a = points[i - 1];
+    const b = points[i];
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const len = Math.hypot(dx, dy);
+    if (len < 1e-6) continue;
+    segments.push({ a, dx, dy, len, start: total, end: total + len });
+    total += len;
+  }
+  if (!segments.length) return points[Math.floor(points.length / 2)];
+  const target = total * 0.5;
+  let seg = segments[0];
+  for (let i = 0; i < segments.length; i += 1) {
+    if (target <= segments[i].end || i === segments.length - 1) {
+      seg = segments[i];
+      break;
+    }
+  }
+  const t = Math.max(0, Math.min(1, (target - seg.start) / seg.len));
+  return { x: seg.a.x + seg.dx * t, y: seg.a.y + seg.dy * t };
+}
+
+function getRoadRenderData(road) {
+  if (!road) return null;
+  const cache = readRoadRenderCache(road);
+  const leftLaneCount = Number(road.leftLaneCount || 0);
+  const rightLaneCount = Number(road.rightLaneCount || 0);
+  const leftLaneWidth = Number(road.leftLaneWidth || road.laneWidth || 3.5);
+  const rightLaneWidth = Number(road.rightLaneWidth || road.laneWidth || 3.5);
+  const laneWidth = Number(road.laneWidth || 3.5);
+  const pointsRef = road.points;
+  const nativeLeftBoundaryRef = road.nativeLeftBoundary;
+  const nativeRightBoundaryRef = road.nativeRightBoundary;
+  const nativeLaneBoundariesRef = road.nativeLaneBoundaries;
+  const laneOffsetRecordsRef = road.laneOffsetRecords;
+  const unchanged = cache
+    && cache.pointsRef === pointsRef
+    && cache.nativeLeftBoundaryRef === nativeLeftBoundaryRef
+    && cache.nativeRightBoundaryRef === nativeRightBoundaryRef
+    && cache.nativeLaneBoundariesRef === nativeLaneBoundariesRef
+    && cache.laneOffsetRecordsRef === laneOffsetRecordsRef
+    && cache.leftLaneCount === leftLaneCount
+    && cache.rightLaneCount === rightLaneCount
+    && cache.leftLaneWidth === leftLaneWidth
+    && cache.rightLaneWidth === rightLaneWidth
+    && cache.laneWidth === laneWidth;
+  if (unchanged) return cache.data;
+
+  const hasNativeBoundaries = Array.isArray(road.nativeLeftBoundary) && road.nativeLeftBoundary.length > 1
+    && Array.isArray(road.nativeRightBoundary) && road.nativeRightBoundary.length > 1;
+  const data = {
+    hasNativeBoundaries,
+    centerRef: hasNativeBoundaries ? road.points || [] : buildOffsetPath(road, (profile) => profile.laneOffset),
+    leftBoundary: hasNativeBoundaries ? road.nativeLeftBoundary : buildOffsetPath(road, (profile) => profile.leftBoundary),
+    rightBoundary: hasNativeBoundaries ? road.nativeRightBoundary : buildOffsetPath(road, (profile) => profile.rightBoundary),
+    laneBoundaries: hasNativeBoundaries ? (road.nativeLaneBoundaries || []) : [],
+    leftArrowPath: leftLaneCount > 0 ? buildOffsetPath(road, (p) => (p.laneOffset + p.leftBoundary) * 0.5) : [],
+    rightArrowPath: rightLaneCount > 0 ? buildOffsetPath(road, (p) => (p.laneOffset + p.rightBoundary) * 0.5) : []
+  };
+  data.leftArrowSeries = buildArrowSeries(data.leftArrowPath, true);
+  data.rightArrowSeries = buildArrowSeries(data.rightArrowPath, false);
+  data.labelPoint = getPolylineMidpoint(data.centerRef) || getPolylineMidpoint(road.points || []);
+  const bounds = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity };
+  appendPointsBounds(bounds, data.leftBoundary);
+  appendPointsBounds(bounds, data.rightBoundary);
+  appendPointsBounds(bounds, data.centerRef);
+  data.bounds = finalizeBounds(bounds, road.points || []);
+
+  writeRoadRenderCache(road, {
+    pointsRef,
+    nativeLeftBoundaryRef,
+    nativeRightBoundaryRef,
+    nativeLaneBoundariesRef,
+    laneOffsetRecordsRef,
+    leftLaneCount,
+    rightLaneCount,
+    leftLaneWidth,
+    rightLaneWidth,
+    laneWidth,
+    data
+  });
+  return data;
+}
+
+function getViewportBounds(marginPx = 80) {
+  if (!canvasEl.value) return null;
+  const canvas = canvasEl.value;
+  const worldMin = screenToWorld(-marginPx, -marginPx);
+  const worldMax = screenToWorld(canvas.width + marginPx, canvas.height + marginPx);
+  return {
+    minX: Math.min(worldMin.x, worldMax.x),
+    minY: Math.min(worldMin.y, worldMax.y),
+    maxX: Math.max(worldMin.x, worldMax.x),
+    maxY: Math.max(worldMin.y, worldMax.y)
+  };
+}
+
+function boundsIntersect(a, b) {
+  if (!a || !b) return true;
+  return !(a.maxX < b.minX || a.minX > b.maxX || a.maxY < b.minY || a.minY > b.maxY);
+}
+
+function shouldDrawRoadLabels(visibleRoadCount) {
+  return view.scale >= 0.65 && visibleRoadCount <= 220;
+}
+
+function shouldDrawLaneArrows(visibleRoadCount, visiblePointCount) {
+  return view.scale >= 1.2 && visibleRoadCount <= 320 && visiblePointCount <= 18000;
+}
+
+function shouldUseOverviewRoadRendering(visibleRoadCount, visiblePointCount) {
+  return view.scale < 0.42 || visibleRoadCount > 900 || visiblePointCount > 50000;
+}
+
+function hexToRgba(hex, alpha) {
+  const h = String(hex || '').trim();
+  const a = Math.max(0, Math.min(1, Number(alpha)));
+  const short = /^#([0-9a-fA-F]{3})$/;
+  const full = /^#([0-9a-fA-F]{6})$/;
+  if (short.test(h)) {
+    const raw = h.slice(1);
+    const r = Number.parseInt(raw[0] + raw[0], 16);
+    const g = Number.parseInt(raw[1] + raw[1], 16);
+    const b = Number.parseInt(raw[2] + raw[2], 16);
+    return `rgba(${r}, ${g}, ${b}, ${a})`;
+  }
+  if (full.test(h)) {
+    const raw = h.slice(1);
+    const r = Number.parseInt(raw.slice(0, 2), 16);
+    const g = Number.parseInt(raw.slice(2, 4), 16);
+    const b = Number.parseInt(raw.slice(4, 6), 16);
+    return `rgba(${r}, ${g}, ${b}, ${a})`;
+  }
+  return '';
+}
+
+function isJunctionRoad(road) {
+  return String(road?.junction ?? '-1') !== '-1';
+}
+
+function getRoadPaletteForRoad(road, selected) {
+  if (selected) {
+    return {
+      fill: DEFAULT_ROAD_RENDER_STYLE.selectedFill,
+      edge: DEFAULT_ROAD_RENDER_STYLE.selectedEdge,
+      lane: DEFAULT_ROAD_RENDER_STYLE.selectedLane,
+      center: DEFAULT_ROAD_RENDER_STYLE.selectedCenter
+    };
+  }
+  const color = isJunctionRoad(road) ? roadColorConfig.junctionColor : roadColorConfig.allColor;
+  const fill = hexToRgba(color, 0.22);
+  const edge = hexToRgba(color, 0.95);
+  const lane = hexToRgba(color, 0.72);
+  const center = hexToRgba(color, 1);
+  if (fill && edge && lane && center) return { fill, edge, lane, center };
+  return {
+    fill: DEFAULT_ROAD_RENDER_STYLE.baseFill,
+    edge: DEFAULT_ROAD_RENDER_STYLE.baseEdge,
+    lane: DEFAULT_ROAD_RENDER_STYLE.baseLane,
+    center: DEFAULT_ROAD_RENDER_STYLE.baseCenter
+  };
+}
+
+function drawRoadSurface(road, selected, renderData = null, options = {}) {
+  if (!road.points || road.points.length < 2) return;
+  if (options.overview) {
+    const overviewColor = options.palette?.center || (selected ? 'rgba(255, 244, 138, 0.98)' : 'rgba(120, 208, 255, 0.88)');
+    const centerRef = options.allowFallbackCenterline
+      ? (road.points || [])
+      : (renderData?.centerRef || getRoadRenderData(road)?.centerRef || []);
+    if (!centerRef.length) return;
+    drawPolyline(
+      centerRef,
+      overviewColor,
+      selected ? 2.2 : 1.2
+    );
     return;
   }
-  const leftBoundary = buildOffsetPath(road, (profile) => profile.leftBoundary);
-  const rightBoundary = buildOffsetPath(road, (profile) => profile.rightBoundary);
-  drawFilledBand(leftBoundary, rightBoundary, selected ? '#6b7280' : '#4b5563');
-  drawPolyline(leftBoundary, '#dce4ef', 1.6);
-  drawPolyline(rightBoundary, '#dce4ef', 1.6);
-  const centerRef = buildOffsetPath(road, (profile) => profile.laneOffset);
-  drawPolyline(centerRef, selected ? '#ffd089' : '#8fd8ff', 1.6, true);
+  const resolvedRenderData = renderData || getRoadRenderData(road);
+  if (!resolvedRenderData) return;
+  const palette = options.palette || (selected
+    ? {
+        fill: DEFAULT_ROAD_RENDER_STYLE.selectedFill,
+        edge: DEFAULT_ROAD_RENDER_STYLE.selectedEdge,
+        lane: DEFAULT_ROAD_RENDER_STYLE.selectedLane,
+        center: DEFAULT_ROAD_RENDER_STYLE.selectedCenter
+      }
+    : {
+        fill: DEFAULT_ROAD_RENDER_STYLE.baseFill,
+        edge: DEFAULT_ROAD_RENDER_STYLE.baseEdge,
+        lane: DEFAULT_ROAD_RENDER_STYLE.baseLane,
+        center: DEFAULT_ROAD_RENDER_STYLE.baseCenter
+      });
+  if (resolvedRenderData.hasNativeBoundaries) {
+    drawFilledBand(resolvedRenderData.leftBoundary, resolvedRenderData.rightBoundary, palette.fill);
+    drawPolyline(resolvedRenderData.leftBoundary, palette.edge, selected ? 2.2 : 1.6);
+    drawPolyline(resolvedRenderData.rightBoundary, palette.edge, selected ? 2.2 : 1.6);
+    if (options.showLaneMarkings || selected) {
+      resolvedRenderData.laneBoundaries.forEach((lane) => {
+        if (lane?.points?.length > 1) drawPolyline(lane.points, palette.lane, selected ? 1.4 : 1, true);
+      });
+    }
+    if (!options.suppressCenterline || selected) {
+      drawPolyline(resolvedRenderData.centerRef, palette.center, selected ? 2.4 : 1.2, true);
+    }
+    return;
+  }
+  drawFilledBand(resolvedRenderData.leftBoundary, resolvedRenderData.rightBoundary, palette.fill);
+  drawPolyline(resolvedRenderData.leftBoundary, palette.edge, selected ? 2.2 : 1.6);
+  drawPolyline(resolvedRenderData.rightBoundary, palette.edge, selected ? 2.2 : 1.6);
+  if (!options.suppressCenterline || selected) {
+    drawPolyline(resolvedRenderData.centerRef, palette.center, selected ? 2.8 : 1.6, true);
+  }
 }
 
 function drawMeterGrid() {
   if (!ctx || !canvasEl.value) return;
   const canvas = canvasEl.value;
+  const roadCount = roads.value.length;
+  if (roadCount > 2600 && view.scale < 1.6) {
+    ctx.fillStyle = '#000000';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    return;
+  }
   const baseStepPx = GRID_BASE_M * view.scale;
   const skip = Math.max(1, Math.ceil(GRID_TARGET_PX / Math.max(0.0001, baseStepPx)));
   const stepM = GRID_BASE_M * skip;
-  const majorEvery = 10;
+  const majorEvery = roadCount > 1600 ? 20 : 10;
+  const maxGridLines = roadCount > 1600 ? 900 : 3000;
   const worldMin = screenToWorld(0, 0);
   const worldMax = screenToWorld(canvas.width, canvas.height);
   const minX = Math.min(worldMin.x, worldMax.x);
@@ -518,7 +960,7 @@ function drawMeterGrid() {
   let xCount = 0;
   for (let x = startX; x <= endX; x += stepM) {
     xCount += 1;
-    if (xCount > 3000) break;
+    if (xCount > maxGridLines) break;
     const sx = x * view.scale + view.offsetX;
     const idx = Math.round(x / stepM);
     const isMajor = idx % majorEvery === 0;
@@ -532,7 +974,7 @@ function drawMeterGrid() {
   let yCount = 0;
   for (let y = startY; y <= endY; y += stepM) {
     yCount += 1;
-    if (yCount > 3000) break;
+    if (yCount > maxGridLines) break;
     const sy = y * view.scale + view.offsetY;
     const idx = Math.round(y / stepM);
     const isMajor = idx % majorEvery === 0;
@@ -602,41 +1044,16 @@ function drawArrowAtWorld(x, y, dirX, dirY, color) {
   ctx.fill();
 }
 
-function drawLaneDirectionArrows(road) {
+function drawLaneDirectionArrows(road, renderData = null) {
   if (!road.points || road.points.length < 2) return;
-  const rightCount = Number(road.rightLaneCount || 0);
-  const leftCount = Number(road.leftLaneCount || 0);
-  const rightPath = rightCount > 0 ? buildOffsetPath(road, (p) => (p.laneOffset + p.rightBoundary) * 0.5) : [];
-  const leftPath = leftCount > 0 ? buildOffsetPath(road, (p) => (p.laneOffset + p.leftBoundary) * 0.5) : [];
-  const drawSeries = (path, forward, color) => {
-    if (!path || path.length < 2) return;
-    let total = 0;
-    const segments = [];
-    for (let i = 1; i < path.length; i += 1) {
-      const a = path[i - 1];
-      const b = path[i];
-      const dx = b.x - a.x;
-      const dy = b.y - a.y;
-      const len = Math.hypot(dx, dy);
-      if (len < 1e-6) continue;
-      segments.push({ a, dx, dy, len, start: total, end: total + len });
-      total += len;
-    }
-    if (!segments.length || total < 1e-6) return;
-    const count = Math.max(1, Math.min(24, Math.floor(total / 55)));
-    let segIdx = 0;
-    for (let k = 1; k <= count; k += 1) {
-      const d = (k * total) / (count + 1);
-      while (segIdx < segments.length - 1 && d > segments[segIdx].end) segIdx += 1;
-      const seg = segments[segIdx];
-      const t = Math.max(0, Math.min(1, (d - seg.start) / seg.len));
-      const x = seg.a.x + seg.dx * t;
-      const y = seg.a.y + seg.dy * t;
-      drawArrowAtWorld(x, y, forward ? seg.dx : -seg.dx, forward ? seg.dy : -seg.dy, color);
-    }
-  };
-  drawSeries(rightPath, false, 'rgba(124, 240, 213, 0.92)');
-  drawSeries(leftPath, true, 'rgba(255, 194, 124, 0.92)');
+  const resolvedRenderData = renderData || getRoadRenderData(road);
+  if (!resolvedRenderData) return;
+  resolvedRenderData.rightArrowSeries.forEach((arrow) => {
+    drawArrowAtWorld(arrow.x, arrow.y, arrow.dirX, arrow.dirY, 'rgba(124, 240, 213, 0.92)');
+  });
+  resolvedRenderData.leftArrowSeries.forEach((arrow) => {
+    drawArrowAtWorld(arrow.x, arrow.y, arrow.dirX, arrow.dirY, 'rgba(255, 194, 124, 0.92)');
+  });
 }
 
 function drawSingleHandle(handle, radius, fill, stroke, strokeWidth = 1.4) {
@@ -656,27 +1073,18 @@ function drawHandles() {
     const road = selectedRoad.value;
     const roadIdx = selectedRoadIndex.value;
     if (!road || roadIdx < 0) return;
-    const start = roadPoseAtEnd(road, true);
-    const end = roadPoseAtEnd(road, false);
-    const activeEndpoint = endpointDrag.value?.roadIdx === roadIdx ? endpointDrag.value.endpoint : '';
-    if (start) {
+    getRoadEditPoints(road).forEach((handle, pointIdx) => {
+      const active = endpointDrag.value
+        && endpointDrag.value.roadIdx === roadIdx
+        && endpointDrag.value.pointIdx === pointIdx;
       drawSingleHandle(
-        start,
-        activeEndpoint === 'start' ? 7.2 : 6,
-        '#6ad0ff',
-        activeEndpoint === 'start' ? '#f8fcff' : '#0f141a',
-        activeEndpoint === 'start' ? 2 : 1.3
+        handle,
+        active ? 6.6 : 5.2,
+        '#88d7ff',
+        active ? '#f8fcff' : '#0f141a',
+        active ? 2 : 1.2
       );
-    }
-    if (end) {
-      drawSingleHandle(
-        end,
-        activeEndpoint === 'end' ? 7.2 : 6,
-        '#ffd16a',
-        activeEndpoint === 'end' ? '#f8fcff' : '#0f141a',
-        activeEndpoint === 'end' ? 2 : 1.3
-      );
-    }
+    });
     return;
   }
   if (mode.value !== 'extend' && mode.value !== 'connect' && mode.value !== 'junction') return;
@@ -763,7 +1171,7 @@ function drawJunctionMeshes() {
   });
 }
 
-function render() {
+function performRender() {
   if (!ctx || !canvasEl.value) return;
   const canvas = canvasEl.value;
   ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -794,13 +1202,40 @@ function render() {
   }
   drawOriginAxes();
   drawJunctionMeshes();
+  const viewportBounds = getViewportBounds(120);
+  const visibleRoads = [];
+  let visiblePointCount = 0;
   roads.value.forEach((r, idx) => {
+    const bounds = getRoadBounds(r);
+    if (bounds && viewportBounds && !boundsIntersect(bounds, viewportBounds)) return;
+    visibleRoads.push({ road: r, idx });
+    visiblePointCount += Array.isArray(r.points) ? r.points.length : 0;
+  });
+  const drawLabels = renderOptions.showRoadLabels && shouldDrawRoadLabels(visibleRoads.length);
+  const drawArrows = shouldDrawLaneArrows(visibleRoads.length, visiblePointCount);
+  const overviewMode = shouldUseOverviewRoadRendering(visibleRoads.length, visiblePointCount);
+  const suppressCenterline = !overviewMode && (view.scale < 1.1 || visibleRoads.length > 220);
+  const showLaneMarkings = !overviewMode && view.scale >= 1.25 && visibleRoads.length <= 160;
+  visibleRoads.forEach(({ road: r, idx }) => {
     const sel = idx === selectedRoadIndex.value;
-    drawRoadSurface(r, sel);
-    drawLaneDirectionArrows(r);
-    if (r.points?.length) {
-      const p = worldToScreen(r.points[0].x, r.points[0].y);
-      ctx.fillStyle = sel ? '#ffc08a' : '#b8ffe9';
+    const needDetail = !overviewMode || sel || drawArrows || drawLabels;
+    const renderData = needDetail ? getRoadRenderData(r) : null;
+    const palette = getRoadPaletteForRoad(r, sel);
+    drawRoadSurface(r, sel, renderData, {
+      overview: overviewMode && !sel,
+      allowFallbackCenterline: true,
+      suppressCenterline,
+      showLaneMarkings,
+      palette
+    });
+    if (drawArrows && !overviewMode) {
+      drawLaneDirectionArrows(r, renderData);
+    }
+    if (drawLabels && !overviewMode) {
+      const labelPoint = renderData?.labelPoint || (Array.isArray(r.points) ? r.points[0] : null);
+      if (!labelPoint) return;
+      const p = worldToScreen(labelPoint.x, labelPoint.y);
+      ctx.fillStyle = '#111111';
       ctx.font = '12px sans-serif';
       ctx.fillText(`R${r.id}`, p.x + 7, p.y - 6);
     }
@@ -810,6 +1245,22 @@ function render() {
     drawPolyline([extendDraft.value.anchor, extendDraft.value.hover], '#77f2c8', 2, true);
   }
   drawHandles();
+}
+
+function render(force = false) {
+  if (force) {
+    if (renderFrame) {
+      cancelAnimationFrame(renderFrame);
+      renderFrame = 0;
+    }
+    performRender();
+    return;
+  }
+  if (renderFrame) return;
+  renderFrame = requestAnimationFrame(() => {
+    renderFrame = 0;
+    performRender();
+  });
 }
 
 function resizeCanvas(keepWorldCenter = true) {
@@ -914,11 +1365,13 @@ function defaultRoadFromPoints(points) {
     predecessorId: String(idx),
     successorType: 'road',
     successorId: String(idx),
+    editPoints: points.map((pt) => ({ x: Number(pt.x), y: Number(pt.y) })),
     points,
     laneOffsetRecords: [{ sOffset: 0, a: 0, b: 0, c: 0, d: 0 }],
     nativeLeftBoundary: null,
     nativeRightBoundary: null,
     nativeLaneBoundaries: null,
+    geometry: [],
     length: polylineLength(points)
   };
 }
@@ -976,6 +1429,169 @@ function sampleBezier(p0, p1, p2, p3, segments = 24) {
     });
   }
   return pts;
+}
+
+function defaultEditPoints(points) {
+  const clean = sanitizePoints(points, 0.05);
+  if (clean.length >= 2) return clean;
+  if (clean.length === 1) return [clean[0], { ...clean[0] }];
+  return [];
+}
+
+function getRoadEditPoints(road) {
+  if (!road) return [];
+  const own = defaultEditPoints(road.editPoints || []);
+  if (own.length >= 2) return own;
+  const sampled = defaultEditPoints(road.points || []);
+  if (sampled.length >= 2) {
+    return [sampled[0], sampled[sampled.length - 1]];
+  }
+  return sampled;
+}
+
+function sanitizePoints(points, minStep = 0.25) {
+  const out = [];
+  (Array.isArray(points) ? points : []).forEach((pt) => {
+    const next = { x: Number(pt?.x), y: Number(pt?.y) };
+    if (!Number.isFinite(next.x) || !Number.isFinite(next.y)) return;
+    const last = out[out.length - 1];
+    if (!last || Math.hypot(last.x - next.x, last.y - next.y) >= minStep) {
+      out.push(next);
+    }
+  });
+  return out;
+}
+
+function bezierCoefficients1d(p0, p1, p2, p3) {
+  return {
+    a: p0,
+    b: 3 * (p1 - p0),
+    c: 3 * (p2 - 2 * p1 + p0),
+    d: p3 - 3 * p2 + 3 * p1 - p0
+  };
+}
+
+function sampleBezierCurve(curve) {
+  const chord = Math.hypot(curve.p3.x - curve.p0.x, curve.p3.y - curve.p0.y);
+  return sampleBezier(curve.p0, curve.p1, curve.p2, curve.p3, Math.max(10, Math.ceil(chord / 1.5)));
+}
+
+function bezierCurveLength(curve) {
+  return polylineLength(sampleBezierCurve(curve));
+}
+
+function bezierCurveToGeometry(curve, startS = 0) {
+  const tangent = vecSub(curve.p1, curve.p0);
+  const hdg = Math.atan2(tangent.y, tangent.x);
+  const c = Math.cos(-hdg);
+  const s = Math.sin(-hdg);
+  const toLocal = (pt) => {
+    const rel = vecSub(pt, curve.p0);
+    return {
+      x: rel.x * c - rel.y * s,
+      y: rel.x * s + rel.y * c
+    };
+  };
+  const l0 = toLocal(curve.p0);
+  const l1 = toLocal(curve.p1);
+  const l2 = toLocal(curve.p2);
+  const l3 = toLocal(curve.p3);
+  const u = bezierCoefficients1d(l0.x, l1.x, l2.x, l3.x);
+  const v = bezierCoefficients1d(l0.y, l1.y, l2.y, l3.y);
+  return {
+    s: startS,
+    x: curve.p0.x,
+    y: curve.p0.y,
+    hdg,
+    length: bezierCurveLength(curve),
+    type: 'paramPoly3',
+    pRange: 'normalized',
+    aU: u.a,
+    bU: u.b,
+    cU: u.c,
+    dU: u.d,
+    aV: v.a,
+    bV: v.b,
+    cV: v.c,
+    dV: v.d
+  };
+}
+
+function buildCatmullRomBezierSegments(points, tension = 0.55) {
+  const pts = sanitizePoints(points);
+  if (pts.length < 2) return [];
+  if (pts.length === 2) {
+    const delta = vecSub(pts[1], pts[0]);
+    return [{
+      p0: pts[0],
+      p1: vecAdd(pts[0], vecScale(delta, 1 / 3)),
+      p2: vecAdd(pts[0], vecScale(delta, 2 / 3)),
+      p3: pts[1]
+    }];
+  }
+  const alpha = clamp(Number(tension || 0.55), 0.05, 1);
+  const segments = [];
+  for (let i = 0; i < pts.length - 1; i += 1) {
+    const p0 = pts[Math.max(0, i - 1)];
+    const p1 = pts[i];
+    const p2 = pts[i + 1];
+    const p3 = pts[Math.min(pts.length - 1, i + 2)];
+    segments.push({
+      p0: p1,
+      p1: vecAdd(p1, vecScale(vecSub(p2, p0), alpha / 6)),
+      p2: vecSub(p2, vecScale(vecSub(p3, p1), alpha / 6)),
+      p3: p2
+    });
+  }
+  return segments;
+}
+
+function buildRoadShapeFromBezierSegments(segments) {
+  if (!Array.isArray(segments) || !segments.length) {
+    return { points: [], geometry: [], length: 0 };
+  }
+  const points = [];
+  const geometry = [];
+  let s = 0;
+  segments.forEach((segment, idx) => {
+    const sampled = sampleBezierCurve(segment);
+    sampled.forEach((pt, sampleIdx) => {
+      if (idx > 0 && sampleIdx === 0) return;
+      const last = points[points.length - 1];
+      if (!last || Math.hypot(last.x - pt.x, last.y - pt.y) > 1e-4) {
+        points.push({ x: pt.x, y: pt.y });
+      }
+    });
+    const geometryRecord = bezierCurveToGeometry(segment, s);
+    geometry.push(geometryRecord);
+    s += geometryRecord.length;
+  });
+  return { points, geometry, length: s };
+}
+
+function buildRoadShapeFromPoints(points, smoothing = drawForm.smoothing) {
+  const clean = sanitizePoints(points);
+  if (clean.length < 2) return { points: clean, geometry: [], length: 0 };
+  return buildRoadShapeFromBezierSegments(buildCatmullRomBezierSegments(clean, smoothing));
+}
+
+function applyRoadShape(road, points, options = {}) {
+  const sourcePoints = defaultEditPoints(points);
+  const shape = Array.isArray(options.bezierSegments) && options.bezierSegments.length
+    ? buildRoadShapeFromBezierSegments(options.bezierSegments)
+    : buildRoadShapeFromPoints(sourcePoints, options.smoothing ?? drawForm.smoothing);
+  road.editPoints = sourcePoints.map((pt) => ({ x: pt.x, y: pt.y }));
+  road.points = shape.points.length ? shape.points : sourcePoints;
+  road.geometry = shape.geometry || [];
+  road.length = Number((shape.length || polylineLength(road.points)).toFixed(6));
+  clearNativeGeometry(road);
+  return road;
+}
+
+function createRoadFromPoints(points, overrides = {}, options = {}) {
+  const road = defaultRoadFromPoints(defaultEditPoints(points));
+  Object.assign(road, overrides || {});
+  return applyRoadShape(road, getRoadEditPoints(road), options);
 }
 
 function nextJunctionId() {
@@ -1146,15 +1762,25 @@ function buildConnectorCenterline(fromApproach, toApproach, smoothness) {
   const d3 = normalizeVec(toApproach.outgoingDir || vecScale(toApproach.dir, -1));
   const minRadius = Math.max(3, Number(fromApproach.halfWidth || 0) + Number(toApproach.halfWidth || 0) + 1.2);
   const directDist = Math.hypot(p3.x - p0.x, p3.y - p0.y);
-  if (directDist <= 1e-6) return [{ x: p0.x, y: p0.y }, { x: p3.x, y: p3.y }];
-  const primary = normalizeConnectorCenterline(
-    buildBezierWithRadiusGuard(p0, p3, d0, d3, smoothness, minRadius),
-    p0,
-    p3
-  );
+  if (directDist <= 1e-6) {
+    return {
+      points: [{ x: p0.x, y: p0.y }, { x: p3.x, y: p3.y }],
+      bezierSegments: []
+    };
+  }
+  const primaryCurve = buildBezierWithRadiusGuard(p0, p3, d0, d3, smoothness, minRadius);
+  const primary = normalizeConnectorCenterline(primaryCurve.points, p0, p3);
   const ratio = polylineLength(primary) / Math.max(1e-6, directDist);
-  if (ratio <= 2.1) return primary;
-  return [{ x: p0.x, y: p0.y }, { x: p3.x, y: p3.y }];
+  if (ratio <= 2.1) {
+    return {
+      points: primary,
+      bezierSegments: [primaryCurve]
+    };
+  }
+  return {
+    points: [{ x: p0.x, y: p0.y }, { x: p3.x, y: p3.y }],
+    bezierSegments: []
+  };
 }
 
 function buildInternalLaneCurve(fromApproach, toApproach, fromLane, toLane, smoothness) {
@@ -1165,7 +1791,7 @@ function buildInternalLaneCurve(fromApproach, toApproach, fromLane, toLane, smoo
   const d0 = normalizeVec(fromApproach.incomingDir || fromApproach.dir);
   const d3 = normalizeVec(toApproach.outgoingDir || vecScale(toApproach.dir, -1));
   const minRadius = Math.max(2, Math.max(Math.abs(startOffset), Math.abs(endOffset)) + 0.8);
-  return buildBezierWithRadiusGuard(p0, p3, d0, d3, smoothness, minRadius);
+  return buildBezierWithRadiusGuard(p0, p3, d0, d3, smoothness, minRadius).points;
 }
 
 function dirAngle(a, b) {
@@ -1194,11 +1820,17 @@ function buildBezierWithRadiusGuard(p0, p3, d0, d3, smoothness, minRadius) {
 
   const p1 = vecAdd(start, vecScale(d0, handleLen));
   const p2 = vecSub(end, vecScale(d3, handleLen));
-  return sampleBezier(start, p1, p2, end, Math.max(18, Math.ceil(chord / 1.8)));
+  return {
+    p0: start,
+    p1,
+    p2,
+    p3: end,
+    points: sampleBezier(start, p1, p2, end, Math.max(18, Math.ceil(chord / 1.8)))
+  };
 }
 
 function extendRoadEndpointToBoundary(road, endpoint, boundary) {
-  const pts = road?.points || [];
+  const pts = getRoadEditPoints(road);
   if (pts.length < 2) return;
   if (endpoint === 'end') {
     const last = pts[pts.length - 1];
@@ -1219,8 +1851,134 @@ function extendRoadEndpointToBoundary(road, endpoint, boundary) {
       pts.unshift({ x: boundary.x, y: boundary.y });
     }
   }
-  road.length = polylineLength(pts);
-  clearNativeGeometry(road);
+  applyRoadShape(road, pts);
+}
+
+function segmentIntersection(a1, a2, b1, b2) {
+  const r = vecSub(a2, a1);
+  const s = vecSub(b2, b1);
+  const denom = r.x * s.y - r.y * s.x;
+  if (Math.abs(denom) < 1e-8) return null;
+  const qp = vecSub(b1, a1);
+  const t = (qp.x * s.y - qp.y * s.x) / denom;
+  const u = (qp.x * r.y - qp.y * r.x) / denom;
+  if (t <= 1e-4 || t >= 1 - 1e-4 || u <= 1e-4 || u >= 1 - 1e-4) return null;
+  return {
+    x: a1.x + t * r.x,
+    y: a1.y + t * r.y,
+    t,
+    u
+  };
+}
+
+function findRoadIntersection(firstRoad, secondRoad) {
+  const firstPts = firstRoad?.points || [];
+  const secondPts = secondRoad?.points || [];
+  for (let i = 0; i < firstPts.length - 1; i += 1) {
+    for (let j = 0; j < secondPts.length - 1; j += 1) {
+      const hit = segmentIntersection(firstPts[i], firstPts[i + 1], secondPts[j], secondPts[j + 1]);
+      if (hit) return { point: { x: hit.x, y: hit.y }, firstSeg: i, secondSeg: j };
+    }
+  }
+  return null;
+}
+
+function isStandaloneRoad(road) {
+  if (!road) return false;
+  const id = String(road.id);
+  return String(road.junction || '-1') === '-1'
+    && String(road.predecessorType || 'road') === 'road'
+    && String(road.successorType || 'road') === 'road'
+    && String(road.predecessorId || id) === id
+    && String(road.successorId || id) === id;
+}
+
+function splitRoadPointsAt(points, segIdx, point) {
+  const source = sanitizePoints(points, 0.05);
+  if (segIdx < 0 || segIdx >= source.length - 1) return null;
+  const hit = { x: Number(point.x), y: Number(point.y) };
+  const left = source.slice(0, segIdx + 1);
+  const right = source.slice(segIdx + 1);
+  if (!left.length || !right.length) return null;
+  if (Math.hypot(left[left.length - 1].x - hit.x, left[left.length - 1].y - hit.y) > 1e-4) {
+    left.push(hit);
+  }
+  if (Math.hypot(right[0].x - hit.x, right[0].y - hit.y) > 1e-4) {
+    right.unshift(hit);
+  }
+  if (left.length < 2 || right.length < 2) return null;
+  return { left, right };
+}
+
+function splitStandaloneRoadAtIntersection(roadIndex, segIdx, point) {
+  const road = roads.value[roadIndex];
+  if (!road || !isStandaloneRoad(road)) return null;
+  const split = splitRoadPointsAt(road.points, segIdx, point);
+  if (!split) return null;
+  const leftRoadId = String(road.id);
+  const rightRoad = createRoadFromPoints(split.right, {
+    junction: '-1',
+    leftLaneCount: road.leftLaneCount,
+    rightLaneCount: road.rightLaneCount,
+    laneWidth: road.laneWidth,
+    leftLaneWidth: road.leftLaneWidth,
+    rightLaneWidth: road.rightLaneWidth,
+    centerType: road.centerType,
+    predecessorType: 'road',
+    successorType: 'road'
+  });
+  applyRoadShape(road, split.left);
+  road.predecessorType = 'road';
+  road.predecessorId = leftRoadId;
+  road.successorType = 'road';
+  road.successorId = String(rightRoad.id);
+  rightRoad.predecessorId = leftRoadId;
+  rightRoad.successorId = String(rightRoad.id);
+  roads.value.splice(roadIndex + 1, 0, rightRoad);
+  return {
+    leftRoadId,
+    rightRoadId: String(rightRoad.id)
+  };
+}
+
+function maybeAutoGenerateJunctionForNewestRoad() {
+  if (!drawForm.autoJunction || roads.value.length < 2) return false;
+  const newRoadIndex = roads.value.length - 1;
+  const newRoad = roads.value[newRoadIndex];
+  if (!isStandaloneRoad(newRoad)) return false;
+  let hitInfo = null;
+  for (let i = 0; i < roads.value.length - 1; i += 1) {
+    const other = roads.value[i];
+    if (!isStandaloneRoad(other)) continue;
+    const hit = findRoadIntersection(newRoad, other);
+    if (hit) {
+      hitInfo = { otherIndex: i, ...hit };
+      break;
+    }
+  }
+  if (!hitInfo) return false;
+
+  const otherSplit = splitStandaloneRoadAtIntersection(hitInfo.otherIndex, hitInfo.secondSeg, hitInfo.point);
+  if (!otherSplit) return false;
+  const shiftedNewIndex = roads.value.findIndex((road) => String(road.id) === String(newRoad.id));
+  const newSplit = splitStandaloneRoadAtIntersection(shiftedNewIndex, hitInfo.firstSeg, hitInfo.point);
+  if (!newSplit) return false;
+
+  const handles = [
+    { id: otherSplit.leftRoadId, endpoint: 'end' },
+    { id: otherSplit.rightRoadId, endpoint: 'start' },
+    { id: newSplit.leftRoadId, endpoint: 'end' },
+    { id: newSplit.rightRoadId, endpoint: 'start' }
+  ].map((item) => ({
+    roadIdx: roads.value.findIndex((road) => String(road.id) === String(item.id)),
+    endpoint: item.endpoint
+  })).filter((item) => item.roadIdx >= 0);
+
+  if (handles.length < 3) return false;
+  const result = generateJunctionFromHandles(handles);
+  if (!result.ok) return false;
+  junctionDraft.value = { handles: [] };
+  return true;
 }
 
 function validateJunctionHandles(handles) {
@@ -1329,11 +2087,14 @@ function generateJunctionFromHandles(handles) {
     for (const to of refined) {
       if (to === from) continue;
       let centerline = buildConnectorCenterline(from, to, junctionForm.smoothness);
-      if (!Array.isArray(centerline) || centerline.length < 2) {
-        centerline = [
+      if (!Array.isArray(centerline?.points) || centerline.points.length < 2) {
+        centerline = {
+          points: [
           { x: Number(from.boundary?.x ?? from.pose?.x ?? 0), y: Number(from.boundary?.y ?? from.pose?.y ?? 0) },
           { x: Number(to.boundary?.x ?? to.pose?.x ?? 0), y: Number(to.boundary?.y ?? to.pose?.y ?? 0) }
-        ];
+          ],
+          bezierSegments: []
+        };
       }
       const fromProfile = resolveApproachLaneProfile(from, 'incoming');
       const toProfile = resolveApproachLaneProfile(to, 'outgoing');
@@ -1352,9 +2113,7 @@ function generateJunctionFromHandles(handles) {
         sectionEndLaneLinks
       } = buildLaneSectionLinkSpecs(from, fromProfile, to, toProfile, useLeftLanes);
 
-      const connectorRoad = defaultRoadFromPoints(centerline);
-      connectorRoad.points = centerline;
-      connectorRoad.length = polylineLength(centerline);
+      const connectorRoad = createRoadFromPoints(centerline.points, {}, { bezierSegments: centerline.bezierSegments });
       connectorRoad.junction = String(meshId);
       const fromLaneWidth = Math.max(0.5, Number(fromProfile.width || 3.5));
       const toLaneWidth = Math.max(0.5, Number(toProfile.width || 3.5));
@@ -1514,14 +2273,14 @@ function generateJunctionFromDraft() {
   }
 }
 
-function buildBezierBetweenHandles(firstHandle, secondHandle, smoothness) {
+function buildBezierBetweenHandles(firstHandle, secondHandle, smoothness, overlapValue = connectForm.overlap) {
   const firstRoad = roads.value[firstHandle.roadIdx];
   const secondRoad = roads.value[secondHandle.roadIdx];
   if (!firstRoad || !secondRoad) return null;
   const p0 = roadPoseAtEnd(firstRoad, firstHandle.endpoint === 'start');
   const p3 = roadPoseAtEnd(secondRoad, secondHandle.endpoint === 'start');
   if (!p0 || !p3) return null;
-  const overlap = clamp(Number(connectForm.overlap || 0), 0, 6);
+  const overlap = clamp(Number(overlapValue || 0), 0, 6);
   const d0 = endpointDirection(firstHandle.endpoint, p0.hdg);
   const d3 = endpointFinalDirection(secondHandle.endpoint, p3.hdg);
   const start = { x: p0.x, y: p0.y };
@@ -1530,8 +2289,9 @@ function buildBezierBetweenHandles(firstHandle, secondHandle, smoothness) {
   const handleLen = Math.max(4, Math.min(120, dist * Number(smoothness || 0.35))) + overlap * 0.25;
   const p1 = { x: start.x + d0.x * handleLen, y: start.y + d0.y * handleLen };
   const p2 = { x: end.x - d3.x * handleLen, y: end.y - d3.y * handleLen };
-  const points = sampleBezier(start, p1, p2, end, Math.max(16, Math.ceil(dist / 2)));
-  return { points, firstRoad, secondRoad, overlap };
+  const curve = { p0: start, p1, p2, p3: end };
+  const points = sampleBezierCurve(curve);
+  return { points, bezierSegments: [curve], firstRoad, secondRoad, overlap };
 }
 
 function laneProfileAtConnectorSide(road, endpoint, sideMode) {
@@ -1575,11 +2335,9 @@ function connectRoadsWithBezier(firstHandle, secondHandle, smoothness) {
   if (firstHandle.roadIdx === secondHandle.roadIdx) return false;
   const built = buildBezierBetweenHandles(firstHandle, secondHandle, smoothness);
   if (!built) return false;
-  const { points, firstRoad, secondRoad, overlap } = built;
-  const newRoad = defaultRoadFromPoints(points);
+  const { points, bezierSegments, firstRoad, secondRoad, overlap } = built;
+  const newRoad = createRoadFromPoints(points, {}, { bezierSegments });
   const profile = blendedConnectorProfile(firstRoad, firstHandle.endpoint, secondRoad, secondHandle.endpoint);
-  newRoad.points = points;
-  newRoad.length = polylineLength(points);
   newRoad.leftLaneCount = profile.leftLaneCount;
   newRoad.rightLaneCount = profile.rightLaneCount;
   newRoad.leftLaneWidth = profile.leftLaneWidth;
@@ -1630,11 +2388,10 @@ function rebuildSelectedConnector() {
   if (fromIdx < 0 || toIdx < 0) return;
   const firstHandle = { roadIdx: fromIdx, endpoint: road.connectorMeta.fromEndpoint };
   const secondHandle = { roadIdx: toIdx, endpoint: road.connectorMeta.toEndpoint };
-  const built = buildBezierBetweenHandles(firstHandle, secondHandle, connectForm.smoothness);
+  const built = buildBezierBetweenHandles(firstHandle, secondHandle, connectForm.smoothness, connectForm.overlap);
   if (!built) return;
   const profile = blendedConnectorProfile(roads.value[fromIdx], firstHandle.endpoint, roads.value[toIdx], secondHandle.endpoint);
-  road.points = built.points;
-  road.length = polylineLength(road.points);
+  applyRoadShape(road, built.points, { bezierSegments: built.bezierSegments });
   road.leftLaneCount = profile.leftLaneCount;
   road.rightLaneCount = profile.rightLaneCount;
   road.leftLaneWidth = profile.leftLaneWidth;
@@ -1642,11 +2399,50 @@ function rebuildSelectedConnector() {
   road.laneWidth = (profile.leftLaneWidth + profile.rightLaneWidth) * 0.5;
   road.connectorMeta.smoothness = Number(connectForm.smoothness);
   road.connectorMeta.overlap = Number(connectForm.overlap || 0);
-  clearNativeGeometry(road);
   detachImportedSource({
     roadIds: [String(road.id)]
   });
   render();
+}
+
+function rebuildConnectorRoadFromMeta(connectorRoad) {
+  if (!connectorRoad?.connectorMeta) return false;
+  const meta = connectorRoad.connectorMeta;
+  const fromIdx = roads.value.findIndex((r) => String(r.id) === String(meta.fromRoadId));
+  const toIdx = roads.value.findIndex((r) => String(r.id) === String(meta.toRoadId));
+  if (fromIdx < 0 || toIdx < 0) return false;
+  const firstHandle = { roadIdx: fromIdx, endpoint: meta.fromEndpoint };
+  const secondHandle = { roadIdx: toIdx, endpoint: meta.toEndpoint };
+  const smoothness = Number(meta.smoothness || 0.35);
+  const overlap = Number(meta.overlap || 0);
+  const built = buildBezierBetweenHandles(firstHandle, secondHandle, smoothness, overlap);
+  if (!built) return false;
+  const profile = blendedConnectorProfile(roads.value[fromIdx], firstHandle.endpoint, roads.value[toIdx], secondHandle.endpoint);
+  applyRoadShape(connectorRoad, built.points, { bezierSegments: built.bezierSegments });
+  connectorRoad.leftLaneCount = profile.leftLaneCount;
+  connectorRoad.rightLaneCount = profile.rightLaneCount;
+  connectorRoad.leftLaneWidth = profile.leftLaneWidth;
+  connectorRoad.rightLaneWidth = profile.rightLaneWidth;
+  connectorRoad.laneWidth = (profile.leftLaneWidth + profile.rightLaneWidth) * 0.5;
+  detachImportedSource({
+    roadIds: [String(connectorRoad.id)]
+  });
+  return true;
+}
+
+function rebuildConnectorsLinkedToRoad(roadId) {
+  const targetRoadId = String(roadId || '').trim();
+  if (!targetRoadId) return false;
+  let changed = false;
+  roads.value.forEach((road) => {
+    if (!road?.connectorMeta) return;
+    if (String(road.connectorMeta.fromRoadId) !== targetRoadId
+      && String(road.connectorMeta.toRoadId) !== targetRoadId) {
+      return;
+    }
+    if (rebuildConnectorRoadFromMeta(road)) changed = true;
+  });
+  return changed;
 }
 
 function getAllHandles() {
@@ -1671,26 +2467,22 @@ function pickHandle(screenX, screenY) {
       best = h;
     }
   });
-  return bestDist <= 10 ? best : null;
+  return bestDist <= 12 ? best : null;
 }
 
-function pickSelectedEndpointHandle(screenX, screenY) {
+function pickSelectedRoadEditPoint(screenX, screenY) {
   const road = selectedRoad.value;
   const roadIdx = selectedRoadIndex.value;
   if (!road || roadIdx < 0) return null;
-  const candidates = [];
-  const start = roadPoseAtEnd(road, true);
-  const end = roadPoseAtEnd(road, false);
-  if (start) candidates.push({ roadIdx, endpoint: 'start', ...start });
-  if (end) candidates.push({ roadIdx, endpoint: 'end', ...end });
+  const editPoints = getRoadEditPoints(road);
   let best = null;
   let bestDist = Infinity;
-  candidates.forEach((h) => {
-    const p = worldToScreen(h.x, h.y);
+  editPoints.forEach((pt, pointIdx) => {
+    const p = worldToScreen(pt.x, pt.y);
     const d = Math.hypot(screenX - p.x, screenY - p.y);
     if (d < bestDist) {
       bestDist = d;
-      best = h;
+      best = { roadIdx, pointIdx, x: pt.x, y: pt.y };
     }
   });
   return bestDist <= 12 ? best : null;
@@ -1702,7 +2494,7 @@ function completeExtend(toPoint) {
   if (!fromRoad) { extendDraft.value = null; return; }
   const d = Math.hypot(toPoint.x - extendDraft.value.anchor.x, toPoint.y - extendDraft.value.anchor.y);
   if (d < 0.5) { extendDraft.value = null; return; }
-  const newRoad = defaultRoadFromPoints([
+  const newRoad = createRoadFromPoints([
     { x: extendDraft.value.anchor.x, y: extendDraft.value.anchor.y },
     { x: toPoint.x, y: toPoint.y }
   ]);
@@ -1744,9 +2536,10 @@ function selectRoad(i) {
 function finishRoad() {
   if (drawingPoints.value.length < 2) return;
   detachImportedSource();
-  roads.value.push(defaultRoadFromPoints(drawingPoints.value.slice()));
+  roads.value.push(createRoadFromPoints(drawingPoints.value.slice()));
   selectedRoadIndex.value = roads.value.length - 1;
   drawingPoints.value = [];
+  maybeAutoGenerateJunctionForNewestRoad();
   render();
 }
 
@@ -1811,25 +2604,25 @@ function applySelectedRoad() {
   r.rightLaneWidth = Math.max(0.5, Number(roadForm.rightLaneWidth || r.rightLaneWidth || 3.5));
   r.laneWidth = (r.leftLaneWidth + r.rightLaneWidth) / 2;
   const targetLength = Number(roadForm.length || r.length);
+  const editPoints = getRoadEditPoints(r);
   if (Number.isFinite(targetLength) && targetLength > 0 && Math.abs(targetLength - r.length) > 1e-6) {
-    const current = polylineLength(r.points);
+    const current = polylineLength(editPoints);
     if (current > 1e-6) {
       const ratio = targetLength / current;
-      const out = [{ x: r.points[0].x, y: r.points[0].y }];
-      for (let i = 1; i < r.points.length; i += 1) {
-        const p0 = r.points[i - 1];
-        const p1 = r.points[i];
+      const out = [{ x: editPoints[0].x, y: editPoints[0].y }];
+      for (let i = 1; i < editPoints.length; i += 1) {
+        const p0 = editPoints[i - 1];
+        const p1 = editPoints[i];
         const dx = p1.x - p0.x;
         const dy = p1.y - p0.y;
         const d = Math.hypot(dx, dy);
         const prev = out[out.length - 1];
         out.push(d > 1e-6 ? { x: prev.x + (dx / d) * d * ratio, y: prev.y + (dy / d) * d * ratio } : { ...prev });
       }
-      r.points = out;
+      r.editPoints = out;
     }
   }
-  clearNativeGeometry(r);
-  r.length = polylineLength(r.points);
+  applyRoadShape(r, getRoadEditPoints(r));
   render();
 }
 
@@ -1973,6 +2766,11 @@ function applyNativeRoads(parsedRoads, importedJunctions = [], importedRoadDetai
     successorId: String(r.successorId ?? r.id ?? idx + 1),
     successorContactPoint: String(r.successorContactPoint || 'start'),
     laneOffsetRecords: [{ sOffset: 0, a: 0, b: 0, c: 0, d: 0 }],
+    editPoints: Array.isArray(r.editPoints) && r.editPoints.length >= 2
+      ? r.editPoints.map((p) => ({ x: Number(p.x), y: Number(p.y) }))
+      : defaultEditPoints(Array.isArray(r.points) && r.points.length >= 2
+        ? [r.points[0], r.points[r.points.length - 1]]
+        : r.points),
     points: Array.isArray(r.points) ? r.points.map((p) => ({ x: Number(p.x), y: Number(p.y), s: Number(p.s), hdg: Number(p.hdg) })) : [],
     nativeLeftBoundary: Array.isArray(r.nativeLeftBoundary) ? r.nativeLeftBoundary.map((p) => ({ x: Number(p.x), y: Number(p.y) })) : [],
     nativeRightBoundary: Array.isArray(r.nativeRightBoundary) ? r.nativeRightBoundary.map((p) => ({ x: Number(p.x), y: Number(p.y) })) : [],
@@ -1991,6 +2789,9 @@ function applyNativeRoads(parsedRoads, importedJunctions = [], importedRoadDetai
     road.successorContactPoint = detail.successorContactPoint || road.successorContactPoint;
   });
   roads.value = normalized;
+  if (normalized.length > 500) {
+    renderOptions.showRoadLabels = false;
+  }
   junctionSpecs.value = Array.isArray(importedJunctions) ? importedJunctions.map((j) => ({ ...j })) : [];
   drawingPoints.value = [];
   junctionDraft.value = { handles: [] };
@@ -2018,10 +2819,18 @@ async function importXodr() {
   try {
     const text = await file.text();
     suppressDetach.value = true;
-    applyHeaderFromXodr(text);
-    const { details, rawRoads } = parseRoadDetailsFromXodr(text);
-    const { specs: parsedJunctions, rawById } = parseJunctionSpecsFromXodr(text);
-    const extras = parseOpenDriveExtrasFromXodr(text);
+    const parsedBundle = parseXodrImportBundle(text);
+    const parsedHeader = parsedBundle?.header || parseHeaderFromXodr(text);
+    importedHeaderXml.value = parsedHeader.rawHeaderXml || '';
+    if (parsedHeader.name) headerForm.name = parsedHeader.name;
+    if (parsedHeader.vendor) headerForm.vendor = parsedHeader.vendor;
+    if (Number.isFinite(parsedHeader.north)) headerForm.north = parsedHeader.north;
+    if (Number.isFinite(parsedHeader.south)) headerForm.south = parsedHeader.south;
+    if (Number.isFinite(parsedHeader.east)) headerForm.east = parsedHeader.east;
+    if (Number.isFinite(parsedHeader.west)) headerForm.west = parsedHeader.west;
+    const { details, rawRoads } = parsedBundle?.roadDetails || parseRoadDetailsFromXodr(text);
+    const { specs: parsedJunctions, rawById } = parsedBundle?.junctions || parseJunctionSpecsFromXodr(text);
+    const extras = parsedBundle?.extras || parseOpenDriveExtrasFromXodr(text);
     rawRoadXmlById.value = rawRoads;
     rawJunctionXmlById.value = rawById;
     rawOpenDriveExtras.value = extras;
@@ -2181,11 +2990,12 @@ function handleMouseDown(e) {
   const sx = e.clientX - rect.left;
   const sy = e.clientY - rect.top;
   if (!view.spaceDown && mode.value === 'select') {
-    const picked = pickSelectedEndpointHandle(sx, sy);
+    const picked = pickSelectedRoadEditPoint(sx, sy);
     if (picked) {
       endpointDrag.value = {
+        kind: 'edit-point',
         roadIdx: picked.roadIdx,
-        endpoint: picked.endpoint,
+        pointIdx: picked.pointIdx,
         moved: false
       };
       render();
@@ -2205,12 +3015,11 @@ function handleMouseMove(e) {
     const rect = canvasEl.value.getBoundingClientRect();
     const world = screenToWorld(e.clientX - rect.left, e.clientY - rect.top);
     const road = roads.value[endpointDrag.value.roadIdx];
-    if (road?.points?.length >= 2) {
-      const idx = endpointDrag.value.endpoint === 'start' ? 0 : (road.points.length - 1);
-      road.points[idx].x = world.x;
-      road.points[idx].y = world.y;
-      road.length = polylineLength(road.points);
-      clearNativeGeometry(road);
+    const editPoints = getRoadEditPoints(road);
+    if (road && editPoints.length >= 2 && endpointDrag.value.pointIdx >= 0 && endpointDrag.value.pointIdx < editPoints.length) {
+      editPoints[endpointDrag.value.pointIdx].x = world.x;
+      editPoints[endpointDrag.value.pointIdx].y = world.y;
+      applyRoadShape(road, editPoints, { smoothing: drawForm.smoothing });
       if (!endpointDrag.value.moved) {
         endpointDrag.value.moved = true;
         detachImportedSource({ roadIds: [road.id] });
@@ -2238,7 +3047,14 @@ function handleMouseMove(e) {
 
 function handleMouseUp() {
   if (endpointDrag.value) {
-    if (endpointDrag.value.moved) suppressNextClick.value = true;
+    const draggedRoad = roads.value[endpointDrag.value.roadIdx];
+    if (endpointDrag.value.moved) {
+      suppressNextClick.value = true;
+      if (draggedRoad) {
+        rebuildConnectorsLinkedToRoad(draggedRoad.id);
+        roadForm.length = Number(draggedRoad.length || 0);
+      }
+    }
     endpointDrag.value = null;
     render();
   }
@@ -2274,6 +3090,41 @@ function handleKeyUp(e) {
   if (e.code === 'Space') view.spaceDown = false;
 }
 
+function syncRoadListViewport() {
+  if (!roadListEl.value) return;
+  roadListViewportHeight.value = Math.max(120, roadListEl.value.clientHeight || 0);
+}
+
+function handleRoadListScroll(e) {
+  const el = e?.target || roadListEl.value;
+  if (!el) return;
+  roadListScrollTop.value = el.scrollTop || 0;
+  if (!roadListViewportHeight.value) syncRoadListViewport();
+}
+
+function openRoadColorDialog() {
+  roadColorDialog.allColor = roadColorConfig.allColor;
+  roadColorDialog.junctionColor = roadColorConfig.junctionColor;
+  roadColorDialog.visible = true;
+}
+
+function closeRoadColorDialog() {
+  roadColorDialog.visible = false;
+}
+
+function applyRoadColorDialog() {
+  roadColorConfig.allColor = roadColorDialog.allColor;
+  roadColorConfig.junctionColor = roadColorDialog.junctionColor;
+  roadColorDialog.visible = false;
+  render(true);
+}
+
+function resetRoadColorDialogDefaults() {
+  roadColorDialog.allColor = '#3a92ff';
+  roadColorDialog.junctionColor = '#ff9b42';
+  render(true);
+}
+
 onMounted(() => {
   ctx = canvasEl.value?.getContext('2d');
   resizeCanvas(false);
@@ -2291,9 +3142,18 @@ onMounted(() => {
     resizeObserver = new ResizeObserver(() => resizeCanvas(true));
     resizeObserver.observe(canvasWrap.value);
   }
+  syncRoadListViewport();
+  if (roadListEl.value) {
+    roadListResizeObserver = new ResizeObserver(() => syncRoadListViewport());
+    roadListResizeObserver.observe(roadListEl.value);
+  }
 });
 
 onBeforeUnmount(() => {
+  if (renderFrame) {
+    cancelAnimationFrame(renderFrame);
+    renderFrame = 0;
+  }
   if (canvasEl.value) {
     canvasEl.value.removeEventListener('click', handleCanvasClick);
     canvasEl.value.removeEventListener('wheel', handleWheel);
@@ -2304,6 +3164,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('keydown', handleKeyDown);
   window.removeEventListener('keyup', handleKeyUp);
   if (resizeObserver) resizeObserver.disconnect();
+  if (roadListResizeObserver) roadListResizeObserver.disconnect();
 });
 
   return {
@@ -2317,11 +3178,18 @@ onBeforeUnmount(() => {
     generateAndDownloadXodr,
     pickXodrFile,
     pickBgFile,
+    openRoadColorDialog,
     roads,
     selectedRoadIndex,
     formatNum,
     getChildRoadEntries,
     selectRoad,
+    roadListEl,
+    handleRoadListScroll,
+    useVirtualRoadList,
+    virtualRoadRows,
+    roadListTopPadding,
+    roadListBottomPadding,
     xodrFileInput,
     mapYamlFileInput,
     bgFileInput,
@@ -2333,7 +3201,13 @@ onBeforeUnmount(() => {
     mouseWorld,
     formatYUp,
     bgGeo,
+    renderOptions,
+    roadColorDialog,
+    closeRoadColorDialog,
+    applyRoadColorDialog,
+    resetRoadColorDialogDefaults,
     headerForm,
+    drawForm,
     connectForm,
     connectDraft,
     getConnectHandleText,
