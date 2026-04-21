@@ -20,7 +20,8 @@ import {
   closeRoadColorDialog as closeRoadColorDialogAction,
   applyRoadColorDialog as applyRoadColorDialogAction,
   resetRoadColorDialogDefaults as resetRoadColorDialogDefaultsAction,
-  getRoadPaletteForRoad as computeRoadPaletteForRoad
+  getRoadPaletteForRoad as computeRoadPaletteForRoad,
+  getJunctionGuideStyle
 } from './roadColors.js';
 
 export function useAppLogic() {
@@ -102,6 +103,20 @@ const junctionForm = reactive({
   smoothness: 0.34,
   transitionLength: 16
 });
+const junctionUi = reactive({
+  generating: false,
+  status: '',
+  lastError: '',
+  lastGeneratedCount: 0,
+  lastExpectedCount: 0
+});
+
+// Targeted tuning for problematic connectors (roadId+endpoint).
+// Key format: "<fromRoadId>:<fromEndpoint>-><toRoadId>:<toEndpoint>"
+const CONNECTOR_SAS_TUNE_OVERRIDES = {
+  '2:end->3:start': { qPreferred: 1.35, qMin: 0.7, qMax: 2.1 },
+  '3:start->2:end': { qPreferred: 0.75, qMin: 0.5, qMax: 1.4 }
+};
 
 const validateDialog = createQualityDialogState();
 const { roadColorDialog, roadColorConfig } = createRoadColorState();
@@ -1075,6 +1090,7 @@ function drawDraftRoadPreview() {
 }
 
 function drawJunctionMeshes() {
+  const guideStyle = getJunctionGuideStyle(roadColorConfig);
   (junctionMeshes.value || []).forEach((mesh) => {
     if (Array.isArray(mesh.polygon) && mesh.polygon.length >= 3) {
       const p0 = worldToScreen(mesh.polygon[0].x, mesh.polygon[0].y);
@@ -1085,27 +1101,27 @@ function drawJunctionMeshes() {
         ctx.lineTo(p.x, p.y);
       }
       ctx.closePath();
-      ctx.fillStyle = 'rgba(238, 181, 98, 0.22)';
-      ctx.strokeStyle = 'rgba(255, 221, 155, 0.78)';
+      ctx.fillStyle = guideStyle.polygonFill;
+      ctx.strokeStyle = guideStyle.polygonStroke;
       ctx.lineWidth = 1.2;
       ctx.fill();
       ctx.stroke();
     }
     (mesh.approaches || []).forEach((a) => {
       if (a?.anchor && a?.boundary) {
-        drawPolyline([a.anchor, a.boundary], 'rgba(118, 251, 209, 0.7)', 1.8, true);
+        drawPolyline([a.anchor, a.boundary], guideStyle.approachLine, 1.8, true);
       }
     });
     (mesh.internalLaneCurves || []).forEach((curve) => {
       if (curve?.length > 1) {
-        drawPolyline(curve, 'rgba(255, 246, 166, 0.65)', 1.1, true);
+        drawPolyline(curve, guideStyle.innerLane, 1.1, true);
       }
     });
     if (mesh.center) {
       const c = worldToScreen(mesh.center.x, mesh.center.y);
       ctx.beginPath();
       ctx.arc(c.x, c.y, 3.4, 0, Math.PI * 2);
-      ctx.fillStyle = '#fff4be';
+      ctx.fillStyle = guideStyle.centerDot;
       ctx.fill();
     }
   });
@@ -1716,13 +1732,27 @@ function buildConnectorCenterline(fromApproach, toApproach, smoothness) {
       bezierSegments: []
     };
   }
-  const primaryCurve = buildBezierWithRadiusGuard(p0, p3, d0, d3, smoothness, minRadius);
-  const primary = normalizeConnectorCenterline(primaryCurve.points, p0, p3);
+  const stub = clamp(directDist * 0.12, 0.6, 2.6);
+  const p0Lead = vecAdd(p0, vecScale(d0, Math.min(stub, directDist * 0.3)));
+  const p3Lead = vecSub(p3, vecScale(d3, Math.min(stub, directDist * 0.3)));
+  const midChord = Math.hypot(p3Lead.x - p0Lead.x, p3Lead.y - p0Lead.y);
+  const primaryCurve = buildBezierWithRadiusGuard(
+    midChord > 0.3 ? p0Lead : p0,
+    midChord > 0.3 ? p3Lead : p3,
+    d0,
+    d3,
+    smoothness,
+    minRadius
+  );
+  const stitched = [{ x: p0.x, y: p0.y }, ...primaryCurve.points, { x: p3.x, y: p3.y }];
+  const primary = normalizeConnectorCenterline(stitched, p0, p3);
   const ratio = polylineLength(primary) / Math.max(1e-6, directDist);
   if (ratio <= 2.1) {
     return {
       points: primary,
-      bezierSegments: [primaryCurve]
+      // Keep endpoints exactly snapped to approach boundaries.
+      // Using the guarded Bezier segment directly may extend p0/p3 slightly.
+      bezierSegments: []
     };
   }
   return {
@@ -1791,6 +1821,274 @@ function buildBezierWithRadiusGuard(p0, p3, d0, d3, smoothness, minRadius) {
     p3: end,
     points: sampleBezier(start, p1, p2, end, Math.max(18, Math.ceil(chord / 1.8)))
   };
+}
+
+function wrapAngleRad(angle) {
+  let out = Number(angle || 0);
+  while (out > Math.PI) out -= Math.PI * 2;
+  while (out < -Math.PI) out += Math.PI * 2;
+  return out;
+}
+
+function connectorTuneKey(fromRoadId, fromEndpoint, toRoadId, toEndpoint) {
+  return `${String(fromRoadId)}:${String(fromEndpoint)}->${String(toRoadId)}:${String(toEndpoint)}`;
+}
+
+function getConnectorSasTune(fromRoadId, fromEndpoint, toRoadId, toEndpoint) {
+  const direct = CONNECTOR_SAS_TUNE_OVERRIDES[connectorTuneKey(fromRoadId, fromEndpoint, toRoadId, toEndpoint)];
+  if (direct) return direct;
+  return CONNECTOR_SAS_TUNE_OVERRIDES[connectorTuneKey(toRoadId, toEndpoint, fromRoadId, fromEndpoint)] || null;
+}
+
+function integrateCurvatureSegment(startPose, curvStart, curvEnd, length, steps = 28) {
+  const len = Math.max(0, Number(length || 0));
+  const n = Math.max(1, Number(steps || 1));
+  const ds = len / n;
+  let x = Number(startPose.x || 0);
+  let y = Number(startPose.y || 0);
+  let hdg = Number(startPose.hdg || 0);
+  for (let i = 0; i < n; i += 1) {
+    const t = (i + 0.5) / n;
+    const k = Number(curvStart || 0) + (Number(curvEnd || 0) - Number(curvStart || 0)) * t;
+    hdg += k * ds * 0.5;
+    x += Math.cos(hdg) * ds;
+    y += Math.sin(hdg) * ds;
+    hdg += k * ds * 0.5;
+  }
+  return { x, y, hdg };
+}
+
+function simulateSasPoses(startPose, curvature, spiralLength, arcLength) {
+  const ls = Math.max(0.08, Number(spiralLength || 0));
+  const la = Math.max(0.08, Number(arcLength || 0));
+  const p0 = { x: Number(startPose.x || 0), y: Number(startPose.y || 0), hdg: Number(startPose.hdg || 0) };
+  const p1 = integrateCurvatureSegment(p0, 0, curvature, ls);
+  const p2 = integrateCurvatureSegment(p1, curvature, curvature, la);
+  const p3 = integrateCurvatureSegment(p2, curvature, 0, ls);
+  return { p0, p1, p2, p3 };
+}
+
+function buildSasGeometryBetweenPoses(startPose, endPose, options = {}) {
+  const x0 = Number(startPose?.x);
+  const y0 = Number(startPose?.y);
+  const h0 = Number(startPose?.hdg);
+  const x3 = Number(endPose?.x);
+  const y3 = Number(endPose?.y);
+  const h3 = Number(endPose?.hdg);
+  if (![x0, y0, h0, x3, y3, h3].every(Number.isFinite)) return null;
+  const chord = Math.hypot(x3 - x0, y3 - y0);
+  if (chord < 0.6) return null;
+  const delta = wrapAngleRad(h3 - h0);
+  const chordDir = Math.atan2(y3 - y0, x3 - x0);
+  const crossLike = Math.sin(chordDir - h0);
+  const turnSign = Math.abs(delta) > 1e-6 ? (delta >= 0 ? 1 : -1) : (crossLike >= 0 ? 1 : -1);
+  const absDelta = Math.max(Math.abs(delta), 1e-4);
+
+  let best = null;
+  const qMin = Number.isFinite(Number(options.qMin)) ? Number(options.qMin) : 0.45;
+  const qMax = Number.isFinite(Number(options.qMax)) ? Number(options.qMax) : 2.2;
+  const qPreferred = Number.isFinite(Number(options.qPreferred)) ? Number(options.qPreferred) : 1;
+  const evalCandidate = (spiralRatio, totalLen, endSpiralScale = 1) => {
+    const tLen = Math.max(chord * 0.5, Number(totalLen || 0));
+    const p = clamp(Number(spiralRatio || 0.35), 0.12, 0.88);
+    const q = clamp(Number(endSpiralScale || 1), qMin, qMax);
+    const ls0 = tLen * p;
+    const ls1 = ls0 * q;
+    const la = tLen - ls0;
+    if (ls0 < 0.08 || ls1 < 0.08 || la < 0.08) return;
+    const headingGain = 0.5 * ls0 + la + 0.5 * ls1;
+    if (headingGain < 1e-6) return;
+    const curvature = turnSign * absDelta / headingGain;
+    const p0 = { x: x0, y: y0, hdg: h0 };
+    const p1 = integrateCurvatureSegment(p0, 0, curvature, ls0);
+    const p2 = integrateCurvatureSegment(p1, curvature, curvature, la);
+    const p3 = integrateCurvatureSegment(p2, curvature, 0, ls1);
+    const poses = { p0, p1, p2, p3 };
+    const posErr = Math.hypot(poses.p3.x - x3, poses.p3.y - y3);
+    const hdgErr = Math.abs(wrapAngleRad(poses.p3.hdg - h3));
+    const qPenalty = Math.abs(Math.log(Math.max(1e-6, q / Math.max(1e-6, qPreferred))));
+    const score = posErr + chord * 0.35 * hdgErr + chord * 0.03 * qPenalty;
+    if (!best || score < best.score) {
+      best = { score, posErr, hdgErr, ls0, ls1, la, curvature, poses, q };
+    }
+  };
+
+  for (let r = 0.2; r <= 0.8 + 1e-6; r += 0.1) {
+    for (let scale = 0.8; scale <= 2.8 + 1e-6; scale += 0.15) {
+      for (let q = 0.6; q <= 1.8 + 1e-6; q += 0.2) {
+        evalCandidate(r, chord * scale, q);
+      }
+    }
+  }
+  if (!best) return null;
+
+  let stepRatio = 0.08;
+  let stepLen = Math.max(0.4, chord * 0.16);
+  let stepQ = 0.16;
+  for (let i = 0; i < 18; i += 1) {
+    const baseRatio = best.ls0 / Math.max(1e-6, best.ls0 + best.la);
+    const baseLen = best.ls0 + best.la;
+    const candidates = [
+      [baseRatio, baseLen, best.q],
+      [baseRatio + stepRatio, baseLen, best.q],
+      [baseRatio - stepRatio, baseLen, best.q],
+      [baseRatio, baseLen + stepLen, best.q],
+      [baseRatio, baseLen - stepLen, best.q],
+      [baseRatio, baseLen, best.q + stepQ],
+      [baseRatio, baseLen, best.q - stepQ]
+    ];
+    const prev = best;
+    candidates.forEach(([ratio, len, q]) => evalCandidate(ratio, len, q));
+    if (best === prev) {
+      stepRatio *= 0.66;
+      stepLen *= 0.66;
+      stepQ *= 0.66;
+    }
+  }
+
+  if (!best) return null;
+
+  const { ls0, ls1, la, curvature, poses } = best;
+  const geometry = [
+    {
+      s: 0,
+      x: poses.p0.x,
+      y: poses.p0.y,
+      hdg: poses.p0.hdg,
+      length: ls0,
+      type: 'spiral',
+      curvStart: 0,
+      curvEnd: curvature
+    },
+    {
+      s: ls0,
+      x: poses.p1.x,
+      y: poses.p1.y,
+      hdg: poses.p1.hdg,
+      length: la,
+      type: 'arc',
+      curvature
+    },
+    {
+      s: ls0 + la,
+      x: poses.p2.x,
+      y: poses.p2.y,
+      hdg: poses.p2.hdg,
+      length: ls1,
+      type: 'spiral',
+      curvStart: curvature,
+      curvEnd: 0
+    }
+  ];
+  return {
+    geometry,
+    length: Number((ls0 + la + ls1).toFixed(6))
+  };
+}
+
+function sampleGeometryToPoints(geometry, step = 0.45) {
+  const out = [];
+  (Array.isArray(geometry) ? geometry : []).forEach((g, idx) => {
+    const len = Math.max(0, Number(g?.length || 0));
+    if (len <= 1e-8) return;
+    const p0 = { x: Number(g.x || 0), y: Number(g.y || 0), hdg: Number(g.hdg || 0) };
+    const type = String(g.type || 'line').toLowerCase();
+    const n = Math.max(1, Math.ceil(len / Math.max(0.1, Number(step || 0.45))));
+    if (idx === 0) out.push({ x: p0.x, y: p0.y });
+    for (let i = 1; i <= n; i += 1) {
+      const sSeg = (len * i) / n;
+      let pose = null;
+      if (type === 'spiral') {
+        pose = integrateCurvatureSegment(p0, Number(g.curvStart || 0), Number(g.curvEnd || 0), sSeg, Math.max(4, Math.ceil(sSeg / 0.12)));
+      } else if (type === 'arc') {
+        const k = Number(g.curvature || 0);
+        if (Math.abs(k) < 1e-10) {
+          pose = { x: p0.x + Math.cos(p0.hdg) * sSeg, y: p0.y + Math.sin(p0.hdg) * sSeg, hdg: p0.hdg };
+        } else {
+          const r = 1 / k;
+          const cx = p0.x - Math.sin(p0.hdg) * r;
+          const cy = p0.y + Math.cos(p0.hdg) * r;
+          const a = p0.hdg + k * sSeg;
+          pose = { x: cx + Math.sin(a) * r, y: cy - Math.cos(a) * r, hdg: a };
+        }
+      } else {
+        pose = { x: p0.x + Math.cos(p0.hdg) * sSeg, y: p0.y + Math.sin(p0.hdg) * sSeg, hdg: p0.hdg };
+      }
+      out.push({ x: pose.x, y: pose.y });
+    }
+  });
+  return sanitizePoints(out, 0.05);
+}
+
+function applySasGeometryToRoad(road, startPose, endPose, options = {}) {
+  const sas = buildSasGeometryBetweenPoses(startPose, endPose, options);
+  if (!sas) return false;
+  road.geometry = sas.geometry;
+  road.length = sas.length;
+  const sampled = sampleGeometryToPoints(sas.geometry, 0.45);
+  if (sampled.length >= 2) {
+    road.points = sampled;
+    road.editPoints = [sampled[0], sampled[sampled.length - 1]];
+  }
+  clearNativeGeometry(road);
+  return true;
+}
+
+function applySasGeometryToRoadSafe(road, startPose, endPose, options = {}) {
+  try {
+    return applySasGeometryToRoad(road, startPose, endPose, options);
+  } catch (error) {
+    console.warn('[junction] applySasGeometryToRoad failed:', error);
+    return false;
+  }
+}
+
+function buildLineArcLineGeometryBetweenPoses(startPose, endPose) {
+  const sas = buildSasGeometryBetweenPoses(startPose, endPose);
+  if (!sas || !Array.isArray(sas.geometry) || sas.geometry.length < 3) return null;
+  const g0 = sas.geometry[0];
+  const g1 = sas.geometry[1];
+  const g2 = sas.geometry[2];
+  const geometry = [
+    {
+      s: 0,
+      x: Number(g0.x || 0),
+      y: Number(g0.y || 0),
+      hdg: Number(g0.hdg || 0),
+      length: Number(g0.length || 0),
+      type: 'line'
+    },
+    {
+      s: Number(g0.length || 0),
+      x: Number(g1.x || 0),
+      y: Number(g1.y || 0),
+      hdg: Number(g1.hdg || 0),
+      length: Number(g1.length || 0),
+      type: 'arc',
+      curvature: Number(g1.curvature || 0)
+    },
+    {
+      s: Number((Number(g0.length || 0) + Number(g1.length || 0)).toFixed(6)),
+      x: Number(g2.x || 0),
+      y: Number(g2.y || 0),
+      hdg: Number(g2.hdg || 0),
+      length: Number(g2.length || 0),
+      type: 'line'
+    }
+  ];
+  const total = geometry.reduce((acc, g) => acc + Number(g.length || 0), 0);
+  return {
+    geometry,
+    length: Number(total.toFixed(6))
+  };
+}
+
+function applyConnectorGeometryToRoad(road, startPose, endPose) {
+  const lal = buildLineArcLineGeometryBetweenPoses(startPose, endPose);
+  if (!lal) return false;
+  road.geometry = lal.geometry;
+  road.length = lal.length;
+  return true;
 }
 
 function extendRoadEndpointToBoundary(road, endpoint, boundary) {
@@ -2052,6 +2350,7 @@ function generateJunctionFromHandles(handles) {
   const generatedRoadIds = [];
   const laneCurves = [];
   const connectorMeta = [];
+  let sasFallbackCount = 0;
   const directedFlows = [];
   for (const from of refined) {
     for (const to of refined) {
@@ -2131,8 +2430,26 @@ function generateJunctionFromHandles(handles) {
     const connectorRoad = createRoadFromPoints(
       primary.centerline.points,
       {},
-      { bezierSegments: primary.centerline.bezierSegments }
+      {
+        bezierSegments: primary.centerline.bezierSegments,
+        smoothing: junctionForm.smoothness
+      }
     );
+    const sasApplied = applySasGeometryToRoadSafe(
+      connectorRoad,
+      {
+        x: Number(primary.from.boundary?.x ?? primary.centerline.points[0]?.x ?? 0),
+        y: Number(primary.from.boundary?.y ?? primary.centerline.points[0]?.y ?? 0),
+        hdg: Math.atan2(primary.from.incomingDir?.y || 0, primary.from.incomingDir?.x || 1)
+      },
+      {
+        x: Number(primary.to.boundary?.x ?? primary.centerline.points[primary.centerline.points.length - 1]?.x ?? 0),
+        y: Number(primary.to.boundary?.y ?? primary.centerline.points[primary.centerline.points.length - 1]?.y ?? 0),
+        hdg: Math.atan2(primary.to.outgoingDir?.y || 0, primary.to.outgoingDir?.x || 1)
+      },
+      getConnectorSasTune(primary.from.road.id, primary.from.handle.endpoint, primary.to.road.id, primary.to.handle.endpoint)
+    );
+    if (!sasApplied) sasFallbackCount += 1;
     connectorRoad.junction = String(meshId);
     const leftStartCount = leftSpec ? leftSpec.links.fromCount : 0;
     const rightStartCount = rightSpec ? rightSpec.links.fromCount : 0;
@@ -2188,50 +2505,19 @@ function generateJunctionFromHandles(handles) {
     };
     connectorRoad.leftWidthRecords = leftWidthRecords;
     connectorRoad.rightWidthRecords = rightWidthRecords;
-    const noLaneTransition = leftStartCount === leftEndCount
-      && rightStartCount === rightEndCount
-      && Math.abs(leftStartWidth - leftEndWidth) < 1e-6
-      && Math.abs(rightStartWidth - rightEndWidth) < 1e-6;
-    if (noLaneTransition) {
-      connectorRoad.laneSectionsSpec = [
-        {
-          s: 0,
-          leftLaneCount: leftStartCount,
-          rightLaneCount: rightStartCount,
-          leftLaneWidth: leftStartWidth,
-          rightLaneWidth: rightStartWidth,
-          centerType: 'none',
-          leftWidthRecords: [{ sOffset: 0, a: leftStartWidth, b: 0, c: 0, d: 0 }],
-          rightWidthRecords: [{ sOffset: 0, a: rightStartWidth, b: 0, c: 0, d: 0 }],
-          laneLinks: sectionStartLaneLinks
-        }
-      ];
-    } else {
-      connectorRoad.laneSectionsSpec = [
-        {
-          s: 0,
-          leftLaneCount: leftStartCount,
-          rightLaneCount: rightStartCount,
-          leftLaneWidth: leftStartWidth,
-          rightLaneWidth: rightStartWidth,
-          centerType: 'none',
-          leftWidthRecords,
-          rightWidthRecords,
-          laneLinks: sectionStartLaneLinks
-        },
-        {
-          s: Math.max(0, connectorRoad.length * 0.75),
-          leftLaneCount: leftEndCount,
-          rightLaneCount: rightEndCount,
-          leftLaneWidth: leftEndWidth,
-          rightLaneWidth: rightEndWidth,
-          centerType: 'none',
-          leftWidthRecords: [{ sOffset: 0, a: leftEndWidth, b: 0, c: 0, d: 0 }],
-          rightWidthRecords: [{ sOffset: 0, a: rightEndWidth, b: 0, c: 0, d: 0 }],
-          laneLinks: sectionEndLaneLinks
-        }
-      ];
-    }
+    connectorRoad.laneSectionsSpec = [
+      {
+        s: 0,
+        leftLaneCount: leftStartCount,
+        rightLaneCount: rightStartCount,
+        leftLaneWidth: leftStartWidth,
+        rightLaneWidth: rightStartWidth,
+        centerType: 'none',
+        leftWidthRecords,
+        rightWidthRecords,
+        laneLinks: sectionStartLaneLinks
+      }
+    ];
 
     const roadLaneCurves = [];
     const appendLaneCurves = (spec) => {
@@ -2319,15 +2605,47 @@ function generateJunctionFromHandles(handles) {
     selectedRoadIndex.value = refined.length ? refined[0].handle.roadIdx : -1;
   }
   render();
-  return { ok: true };
+  return {
+    ok: true,
+    generatedCount: generatedRoadIds.length,
+    expectedCount: expectedConnectorCount,
+    sasFallbackCount
+  };
 }
 
 function generateJunctionFromDraft() {
+  if (junctionUi.generating) return;
   const handles = (junctionDraft.value.handles || []).slice();
-  const result = generateJunctionFromHandles(handles);
-  junctionDraft.value = { handles: [] };
-  if (!result.ok) {
-    window.alert(result.reason || '自动路口生成失败。');
+  junctionUi.generating = true;
+  junctionUi.status = '正在生成路口...';
+  junctionUi.lastError = '';
+  junctionUi.lastGeneratedCount = 0;
+  junctionUi.lastExpectedCount = 0;
+  render();
+  try {
+    const result = generateJunctionFromHandles(handles);
+    junctionDraft.value = { handles: [] };
+    if (!result?.ok) {
+      junctionUi.lastError = result?.reason || '自动路口生成失败。';
+      junctionUi.status = '';
+      window.alert(junctionUi.lastError);
+      return;
+    }
+    junctionUi.lastGeneratedCount = Number(result.generatedCount || 0);
+    junctionUi.lastExpectedCount = Number(result.expectedCount || 0);
+    const sasFallbackCount = Number(result.sasFallbackCount || 0);
+    junctionUi.status = `已生成 ${junctionUi.lastGeneratedCount}/${junctionUi.lastExpectedCount} 条连接道路`;
+    if (sasFallbackCount > 0) {
+      junctionUi.status += `（${sasFallbackCount} 条使用了回退几何）`;
+    }
+  } catch (error) {
+    const message = error?.message || String(error || '未知错误');
+    junctionUi.lastError = `自动路口生成异常：${message}`;
+    junctionUi.status = '';
+    console.error('[junction] generate failed:', error);
+    window.alert(junctionUi.lastError);
+  } finally {
+    junctionUi.generating = false;
     render();
   }
 }
@@ -2395,14 +2713,42 @@ function connectRoadsWithBezier(firstHandle, secondHandle, smoothness) {
   const built = buildBezierBetweenHandles(firstHandle, secondHandle, smoothness);
   if (!built) return false;
   const { points, bezierSegments, firstRoad, secondRoad, overlap } = built;
-  const newRoad = createRoadFromPoints(points, {}, { bezierSegments });
+  const existingIdx = roads.value.findIndex((r) => {
+    if (!r?.connectorMeta) return false;
+    const m = r.connectorMeta;
+    const sameDir = String(m.fromRoadId) === String(firstRoad.id)
+      && String(m.toRoadId) === String(secondRoad.id)
+      && String(m.fromEndpoint) === String(firstHandle.endpoint)
+      && String(m.toEndpoint) === String(secondHandle.endpoint);
+    const reverseDir = String(m.fromRoadId) === String(secondRoad.id)
+      && String(m.toRoadId) === String(firstRoad.id)
+      && String(m.fromEndpoint) === String(secondHandle.endpoint)
+      && String(m.toEndpoint) === String(firstHandle.endpoint);
+    return sameDir || reverseDir;
+  });
+  const targetRoad = existingIdx >= 0
+    ? roads.value[existingIdx]
+    : createRoadFromPoints(points, {}, { bezierSegments });
   const profile = blendedConnectorProfile(firstRoad, firstHandle.endpoint, secondRoad, secondHandle.endpoint);
-  newRoad.leftLaneCount = profile.leftLaneCount;
-  newRoad.rightLaneCount = profile.rightLaneCount;
-  newRoad.leftLaneWidth = profile.leftLaneWidth;
-  newRoad.rightLaneWidth = profile.rightLaneWidth;
-  newRoad.laneWidth = (profile.leftLaneWidth + profile.rightLaneWidth) * 0.5;
-  newRoad.connectorMeta = {
+  applyRoadShape(targetRoad, points, { bezierSegments });
+  const p0 = roadPoseAtEnd(firstRoad, firstHandle.endpoint === 'start');
+  const p3 = roadPoseAtEnd(secondRoad, secondHandle.endpoint === 'start');
+  if (p0 && p3) {
+    const d0 = endpointDirection(firstHandle.endpoint, p0.hdg);
+    const d3 = endpointFinalDirection(secondHandle.endpoint, p3.hdg);
+    applySasGeometryToRoadSafe(
+      targetRoad,
+      { x: p0.x, y: p0.y, hdg: Math.atan2(d0.y, d0.x) },
+      { x: p3.x, y: p3.y, hdg: Math.atan2(d3.y, d3.x) },
+      getConnectorSasTune(firstRoad.id, firstHandle.endpoint, secondRoad.id, secondHandle.endpoint)
+    );
+  }
+  targetRoad.leftLaneCount = profile.leftLaneCount;
+  targetRoad.rightLaneCount = profile.rightLaneCount;
+  targetRoad.leftLaneWidth = profile.leftLaneWidth;
+  targetRoad.rightLaneWidth = profile.rightLaneWidth;
+  targetRoad.laneWidth = (profile.leftLaneWidth + profile.rightLaneWidth) * 0.5;
+  targetRoad.connectorMeta = {
     fromRoadId: String(firstRoad.id),
     toRoadId: String(secondRoad.id),
     fromEndpoint: firstHandle.endpoint,
@@ -2410,31 +2756,36 @@ function connectRoadsWithBezier(firstHandle, secondHandle, smoothness) {
     smoothness: Number(smoothness || 0.35),
     overlap: Number(overlap || 0)
   };
-  newRoad.predecessorType = 'road';
-  newRoad.predecessorId = String(firstRoad.id);
-  newRoad.successorType = 'road';
-  newRoad.successorId = String(secondRoad.id);
+  targetRoad.predecessorType = 'road';
+  targetRoad.predecessorId = String(firstRoad.id);
+  targetRoad.successorType = 'road';
+  targetRoad.successorId = String(secondRoad.id);
   if (firstHandle.endpoint === 'end') {
     firstRoad.successorType = 'road';
-    firstRoad.successorId = newRoad.id;
+    firstRoad.successorId = targetRoad.id;
   } else {
     firstRoad.predecessorType = 'road';
-    firstRoad.predecessorId = newRoad.id;
+    firstRoad.predecessorId = targetRoad.id;
   }
   if (secondHandle.endpoint === 'start') {
     secondRoad.predecessorType = 'road';
-    secondRoad.predecessorId = newRoad.id;
+    secondRoad.predecessorId = targetRoad.id;
   } else {
     secondRoad.successorType = 'road';
-    secondRoad.successorId = newRoad.id;
+    secondRoad.successorId = targetRoad.id;
   }
   clearNativeGeometry(firstRoad);
   clearNativeGeometry(secondRoad);
+  clearNativeGeometry(targetRoad);
   detachImportedSource({
-    roadIds: [String(firstRoad.id), String(secondRoad.id)]
+    roadIds: [String(firstRoad.id), String(secondRoad.id), String(targetRoad.id)]
   });
-  roads.value.push(newRoad);
-  selectedRoadIndex.value = roads.value.length - 1;
+  if (existingIdx < 0) {
+    roads.value.push(targetRoad);
+    selectedRoadIndex.value = roads.value.length - 1;
+  } else {
+    selectedRoadIndex.value = existingIdx;
+  }
   render();
   return true;
 }
@@ -2451,6 +2802,18 @@ function rebuildSelectedConnector() {
   if (!built) return;
   const profile = blendedConnectorProfile(roads.value[fromIdx], firstHandle.endpoint, roads.value[toIdx], secondHandle.endpoint);
   applyRoadShape(road, built.points, { bezierSegments: built.bezierSegments });
+  const p0 = roadPoseAtEnd(roads.value[fromIdx], firstHandle.endpoint === 'start');
+  const p3 = roadPoseAtEnd(roads.value[toIdx], secondHandle.endpoint === 'start');
+  if (p0 && p3) {
+    const d0 = endpointDirection(firstHandle.endpoint, p0.hdg);
+    const d3 = endpointFinalDirection(secondHandle.endpoint, p3.hdg);
+    applySasGeometryToRoadSafe(
+      road,
+      { x: p0.x, y: p0.y, hdg: Math.atan2(d0.y, d0.x) },
+      { x: p3.x, y: p3.y, hdg: Math.atan2(d3.y, d3.x) },
+      getConnectorSasTune(roads.value[fromIdx].id, firstHandle.endpoint, roads.value[toIdx].id, secondHandle.endpoint)
+    );
+  }
   road.leftLaneCount = profile.leftLaneCount;
   road.rightLaneCount = profile.rightLaneCount;
   road.leftLaneWidth = profile.leftLaneWidth;
@@ -2478,6 +2841,18 @@ function rebuildConnectorRoadFromMeta(connectorRoad) {
   if (!built) return false;
   const profile = blendedConnectorProfile(roads.value[fromIdx], firstHandle.endpoint, roads.value[toIdx], secondHandle.endpoint);
   applyRoadShape(connectorRoad, built.points, { bezierSegments: built.bezierSegments });
+  const p0 = roadPoseAtEnd(roads.value[fromIdx], firstHandle.endpoint === 'start');
+  const p3 = roadPoseAtEnd(roads.value[toIdx], secondHandle.endpoint === 'start');
+  if (p0 && p3) {
+    const d0 = endpointDirection(firstHandle.endpoint, p0.hdg);
+    const d3 = endpointFinalDirection(secondHandle.endpoint, p3.hdg);
+    applySasGeometryToRoadSafe(
+      connectorRoad,
+      { x: p0.x, y: p0.y, hdg: Math.atan2(d0.y, d0.x) },
+      { x: p3.x, y: p3.y, hdg: Math.atan2(d3.y, d3.x) },
+      getConnectorSasTune(roads.value[fromIdx].id, firstHandle.endpoint, roads.value[toIdx].id, secondHandle.endpoint)
+    );
+  }
   connectorRoad.leftLaneCount = profile.leftLaneCount;
   connectorRoad.rightLaneCount = profile.rightLaneCount;
   connectorRoad.leftLaneWidth = profile.leftLaneWidth;
@@ -3248,6 +3623,7 @@ onBeforeUnmount(() => {
     selectedRoad,
     rebuildSelectedConnector,
     junctionForm,
+    junctionUi,
     junctionDraft,
     junctionMeshes,
     generateJunctionFromDraft,

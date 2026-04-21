@@ -5,11 +5,13 @@ export function createRoadColorState() {
     roadColorDialog: reactive({
       visible: false,
       allColor: '#3a92ff',
-      junctionColor: '#ff9b42'
+      junctionColor: '#ff9b42',
+      junctionGuideColor: '#ffdd9b'
     }),
     roadColorConfig: reactive({
       allColor: '#3a92ff',
-      junctionColor: '#ff9b42'
+      junctionColor: '#ff9b42',
+      junctionGuideColor: '#ffdd9b'
     })
   };
 }
@@ -17,6 +19,7 @@ export function createRoadColorState() {
 export function openRoadColorDialog(dialog, config) {
   dialog.allColor = config.allColor;
   dialog.junctionColor = config.junctionColor;
+  dialog.junctionGuideColor = config.junctionGuideColor;
   dialog.visible = true;
 }
 
@@ -27,12 +30,14 @@ export function closeRoadColorDialog(dialog) {
 export function applyRoadColorDialog(dialog, config) {
   config.allColor = dialog.allColor;
   config.junctionColor = dialog.junctionColor;
+  config.junctionGuideColor = dialog.junctionGuideColor;
   dialog.visible = false;
 }
 
 export function resetRoadColorDialogDefaults(dialog) {
   dialog.allColor = '#3a92ff';
   dialog.junctionColor = '#ff9b42';
+  dialog.junctionGuideColor = '#ffdd9b';
 }
 
 function hexToRgba(hex, alpha) {
@@ -81,5 +86,16 @@ export function getRoadPaletteForRoad(road, selected, roadColorConfig, defaultRo
     edge: defaultRoadRenderStyle.baseEdge,
     lane: defaultRoadRenderStyle.baseLane,
     center: defaultRoadRenderStyle.baseCenter
+  };
+}
+
+export function getJunctionGuideStyle(roadColorConfig) {
+  const base = String(roadColorConfig?.junctionGuideColor || '#ffdd9b');
+  return {
+    polygonFill: hexToRgba(base, 0.22) || 'rgba(238, 181, 98, 0.22)',
+    polygonStroke: hexToRgba(base, 0.78) || 'rgba(255, 221, 155, 0.78)',
+    approachLine: hexToRgba(base, 0.7) || 'rgba(118, 251, 209, 0.7)',
+    innerLane: hexToRgba(base, 0.65) || 'rgba(255, 246, 166, 0.65)',
+    centerDot: hexToRgba(base, 1) || '#fff4be'
   };
 }

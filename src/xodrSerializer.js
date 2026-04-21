@@ -171,6 +171,8 @@ function normalizeGeometry(rawGeometry) {
       length: roundedLength,
       type: g.type || 'line',
       curvature: num(g.curvature, 0),
+      curvStart: num(g.curvStart, 0),
+      curvEnd: num(g.curvEnd, 0),
       pRange: g.pRange || 'normalized',
       aU: num(g.aU, 0),
       bU: num(g.bU, 0),
@@ -289,7 +291,9 @@ function geometryXml(road) {
   return geometry.map((g) => {
     const type = String(g.type || 'line').toLowerCase();
     let geomTag = '        <line/>';
-    if (type === 'arc') {
+    if (type === 'spiral') {
+      geomTag = `        <spiral curvStart="${Number(g.curvStart || 0).toFixed(12)}" curvEnd="${Number(g.curvEnd || 0).toFixed(12)}"/>`;
+    } else if (type === 'arc') {
       geomTag = `        <arc curvature="${Number(g.curvature || 0).toFixed(12)}"/>`;
     } else if (type === 'parampoly3') {
       geomTag = `        <paramPoly3 aU="${Number(g.aU || 0).toFixed(12)}" bU="${Number(g.bU || 0).toFixed(12)}" cU="${Number(g.cU || 0).toFixed(12)}" dU="${Number(g.dU || 0).toFixed(12)}" aV="${Number(g.aV || 0).toFixed(12)}" bV="${Number(g.bV || 0).toFixed(12)}" cV="${Number(g.cV || 0).toFixed(12)}" dV="${Number(g.dV || 0).toFixed(12)}" pRange="${esc(g.pRange || 'normalized')}"/>`;

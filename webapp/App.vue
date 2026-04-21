@@ -21,6 +21,11 @@
         <button type="button" @click="pickBgFile">上传底图</button>
         <button type="button" @click="openRoadColorDialog">道路颜色</button>
       </div>
+      <div class="topbar-status">
+        <span class="status-chip">模式: {{ mode }}</span>
+        <span class="status-chip">道路: {{ roads.length }}</span>
+        <span class="status-chip">已选: {{ selectedRoad ? selectedRoad.id : '-' }}</span>
+      </div>
     </header>
 
     <aside class="sidebar left-rail">
@@ -118,7 +123,7 @@
             <input v-model="renderOptions.showRoadLabels" type="checkbox" />
             显示道路编号
           </label>
-          <div style="grid-column: 1 / -1;" class="meta">绘制完成后会把折线平滑成可导出的曲线，并在简单十字相交场景下自动拆分道路后生成 junction。</div>
+          <div style="grid-column: 1 / -1;" class="meta">开启后：完成道路时会先做平滑，再尝试在简单十字相交场景自动拆分并生成路口；关闭后只做道路完成，不触发自动路口。</div>
         </div>
       </section>
 
@@ -158,8 +163,13 @@
           <div style="grid-column: 1 / -1;" class="meta">点3: {{ getConnectHandleText(junctionDraft.handles[2]) }}</div>
           <div style="grid-column: 1 / -1;" class="meta">点4(可选): {{ getConnectHandleText(junctionDraft.handles[3]) }}</div>
           <div style="grid-column: 1 / -1;" class="meta">已生成路口: {{ junctionMeshes.length }}</div>
+          <div style="grid-column: 1 / -1;" class="meta">当前选择端点: {{ junctionDraft.handles.length }}/4</div>
+          <div v-if="junctionUi.status" style="grid-column: 1 / -1;" class="meta ok-text">{{ junctionUi.status }}</div>
+          <div v-if="junctionUi.lastError" style="grid-column: 1 / -1;" class="meta err-text">{{ junctionUi.lastError }}</div>
           <div class="row" style="grid-column: 1 / -1; margin-top: 4px;">
-            <button type="button" :disabled="junctionDraft.handles.length < 3" @click="generateJunctionFromDraft">生成路口</button>
+            <button type="button" :disabled="junctionDraft.handles.length < 3 || junctionUi.generating" @click="generateJunctionFromDraft">
+              {{ junctionUi.generating ? '生成中...' : '生成路口' }}
+            </button>
             <button type="button" @click="clearJunctionDraft">清空路口端点选择</button>
           </div>
         </div>
@@ -218,7 +228,10 @@
           <label>Junction道路颜色
             <input v-model="roadColorDialog.junctionColor" type="color" />
           </label>
-          <div style="grid-column: 1 / -1;" class="meta">应用后：普通道路和 junction 道路会按两种颜色渲染。</div>
+          <label style="grid-column: 1 / -1;">Junction区域辅助线颜色
+            <input v-model="roadColorDialog.junctionGuideColor" type="color" />
+          </label>
+          <div style="grid-column: 1 / -1;" class="meta">应用后：普通道路、junction道路以及 junction 区域辅助线会按对应颜色渲染。</div>
           <div class="row" style="grid-column: 1 / -1; margin-top: 6px;">
             <button type="button" @click="applyRoadColorDialog">应用</button>
             <button type="button" @click="resetRoadColorDialogDefaults">恢复默认</button>
@@ -329,6 +342,7 @@ const {
   selectedRoad,
   rebuildSelectedConnector,
   junctionForm,
+  junctionUi,
   junctionDraft,
   junctionMeshes,
   generateJunctionFromDraft,
