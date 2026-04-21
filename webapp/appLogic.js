@@ -3117,6 +3117,129 @@ function finishRoad() {
   render();
 }
 
+function removeRawJunctionRecords(junctionIds) {
+  if (!Array.isArray(junctionIds) || !junctionIds.length) return;
+  const ids = new Set(junctionIds.map((id) => String(id ?? '').trim()).filter(Boolean));
+  if (!ids.size) return;
+
+  const nextRaw = { ...(rawJunctionXmlById.value || {}) };
+  let rawChanged = false;
+  Object.keys(nextRaw).forEach((id) => {
+    if (!ids.has(id)) return;
+    delete nextRaw[id];
+    rawChanged = true;
+  });
+  if (rawChanged) rawJunctionXmlById.value = nextRaw;
+
+  const nextDirty = { ...(dirtyJunctionIds.value || {}) };
+  let dirtyChanged = false;
+  Object.keys(nextDirty).forEach((id) => {
+    if (!ids.has(id)) return;
+    delete nextDirty[id];
+    dirtyChanged = true;
+  });
+  if (dirtyChanged) dirtyJunctionIds.value = nextDirty;
+}
+
+function synchronizeTopologyAfterRoadRemoval(removedRoadId) {
+  const removedId = String(removedRoadId ?? '').trim();
+  if (!removedId) return;
+  const existingRoadIds = new Set(
+    roads.value.map((road) => String(road?.id ?? '').trim()).filter(Boolean)
+  );
+
+  roads.value.forEach((road) => {
+    const ownId = String(road?.id ?? '').trim();
+    if (!ownId) return;
+    if (String(road.predecessorType || 'road') === 'road' && String(road.predecessorId || '').trim() === removedId) {
+      road.predecessorId = ownId;
+    }
+    if (String(road.successorType || 'road') === 'road' && String(road.successorId || '').trim() === removedId) {
+      road.successorId = ownId;
+    }
+  });
+
+  const touchedJunctionIds = new Set();
+  junctionSpecs.value = (junctionSpecs.value || []).map((junction) => {
+    const junctionId = String(junction?.id ?? '').trim();
+    const nextConnections = (Array.isArray(junction?.connections) ? junction.connections : []).filter((conn) => {
+      const incomingRoad = String(conn?.incomingRoad ?? '').trim();
+      const connectingRoad = String(conn?.connectingRoad ?? '').trim();
+      return existingRoadIds.has(incomingRoad) && existingRoadIds.has(connectingRoad);
+    });
+    if (nextConnections.length !== (junction?.connections || []).length) {
+      touchedJunctionIds.add(junctionId);
+    }
+    return {
+      ...junction,
+      id: junctionId,
+      connections: nextConnections
+    };
+  });
+
+  junctionMeshes.value = (junctionMeshes.value || []).map((mesh) => {
+    const nextApproaches = (mesh?.approaches || []).filter((a) => existingRoadIds.has(String(a?.roadId ?? '').trim()));
+    const nextConnectorMeta = (mesh?.connectorMeta || []).filter((conn) => (
+      existingRoadIds.has(String(conn?.roadId ?? '').trim())
+      && existingRoadIds.has(String(conn?.fromRoadId ?? '').trim())
+      && existingRoadIds.has(String(conn?.toRoadId ?? '').trim())
+    ));
+    return {
+      ...mesh,
+      approaches: nextApproaches,
+      connectorMeta: nextConnectorMeta
+    };
+  }).filter((mesh) => {
+    const meshId = String(mesh?.id ?? '').trim();
+    const hasSpec = (junctionSpecs.value || []).some((junction) => String(junction?.id ?? '').trim() === meshId);
+    return hasSpec || (mesh?.approaches || []).length || (mesh?.connectorMeta || []).length;
+  });
+
+  const referencedJunctionIds = new Set(
+    roads.value
+      .map((road) => String(road?.junction ?? '').trim())
+      .filter((id) => id && id !== '-1')
+  );
+
+  const removedJunctionIds = [];
+  junctionSpecs.value = (junctionSpecs.value || []).filter((junction) => {
+    const junctionId = String(junction?.id ?? '').trim();
+    const keep = (junction?.connections || []).length > 0 || referencedJunctionIds.has(junctionId);
+    if (!keep) removedJunctionIds.push(junctionId);
+    return keep;
+  });
+
+  if (removedJunctionIds.length) {
+    const removedSet = new Set(removedJunctionIds);
+    junctionMeshes.value = (junctionMeshes.value || []).filter((mesh) => !removedSet.has(String(mesh?.id ?? '').trim()));
+    removeRawJunctionRecords(removedJunctionIds);
+  }
+
+  const survivingJunctionIds = new Set(
+    (junctionSpecs.value || []).map((junction) => String(junction?.id ?? '').trim()).filter(Boolean)
+  );
+
+  roads.value.forEach((road) => {
+    const ownId = String(road?.id ?? '').trim();
+    const junctionId = String(road?.junction ?? '').trim();
+    if (junctionId && junctionId !== '-1' && !survivingJunctionIds.has(junctionId)) {
+      road.junction = '-1';
+      if (String(road.predecessorType || 'road') === 'junction' && String(road.predecessorId || '').trim() === junctionId) {
+        road.predecessorType = 'road';
+        road.predecessorId = ownId;
+      }
+      if (String(road.successorType || 'road') === 'junction' && String(road.successorId || '').trim() === junctionId) {
+        road.successorType = 'road';
+        road.successorId = ownId;
+      }
+    }
+  });
+
+  if (touchedJunctionIds.size) {
+    detachImportedSource({ junctionIds: [...touchedJunctionIds] });
+  }
+}
+
 function undoPoint() {
   if (!drawingPoints.value.length) return;
   drawingPoints.value.pop();
@@ -3143,15 +3266,7 @@ function deleteRoad() {
       delete nextDirty[removedId];
       dirtyRoadIds.value = nextDirty;
     }
-    junctionMeshes.value = (junctionMeshes.value || []).filter((mesh) => {
-      const relatedApproach = (mesh.approaches || []).some((a) => String(a.roadId) === removedId);
-      const relatedConnector = (mesh.connectorMeta || []).some((c) => (
-        String(c.roadId) === removedId
-        || String(c.fromRoadId) === removedId
-        || String(c.toRoadId) === removedId
-      ));
-      return !relatedApproach && !relatedConnector;
-    });
+    synchronizeTopologyAfterRoadRemoval(removedId);
   }
   selectedRoadIndex.value = -1;
   render();

@@ -436,9 +436,14 @@ function buildXodr(spec) {
   const rawOpenDriveExtras = Array.isArray(spec.rawOpenDriveExtras) ? spec.rawOpenDriveExtras : [];
   const roadIndex = new Map(roads.map((road) => [String(road.id), road]));
 
-  const headerXml = (typeof header.rawHeaderXml === 'string' && header.rawHeaderXml.trim())
-    ? header.rawHeaderXml.trim()
-    : `  <header revMajor="1" revMinor="4" name="${esc(header.name || 'web_generated_map')}" version="1.00" date="${esc(header.date || new Date().toISOString())}" north="${Number(header.north || 0)}" south="${Number(header.south || 0)}" east="${Number(header.east || 0)}" west="${Number(header.west || 0)}" vendor="${esc(header.vendor || 'opendrive_web_tool')}"/>`;
+  const headerXml = [
+    `  <header revMajor="1" revMinor="4" name="${esc(header.name || '')}" version="1" date="${esc(header.date || new Date().toISOString())}" north="${Number(header.north || 0)}" south="${Number(header.south || 0)}" east="${Number(header.east || 0)}" west="${Number(header.west || 0)}" >`,
+    '    <geoReference><![CDATA[]]></geoReference>',
+    '    <userData>',
+    '      <vectorScene program="web_editor_map"/>',
+    '    </userData>',
+    '  </header>'
+  ].join('\n');
 
   return [
     '<?xml version="1.0" encoding="UTF-8"?>',
