@@ -1,77 +1,132 @@
 <template>
   <main class="layout">
     <header class="topbar">
-      <div class="toolbar-group">
-        <button type="button" class="mode-btn" :class="{ active: mode === 'draw' }" @click="setMode('draw')">绘制</button>
-        <button type="button" class="mode-btn" :class="{ active: mode === 'select' }" @click="setMode('select')">选择</button>
-        <button type="button" class="mode-btn" :class="{ active: mode === 'connect' }" @click="setMode('connect')">连接</button>
-        <button type="button" class="mode-btn" :class="{ active: mode === 'extend' }" @click="setMode('extend')">延伸</button>
-        <button type="button" class="mode-btn" :class="{ active: mode === 'junction' }" @click="setMode('junction')">路口</button>
+      <div class="brand-block">
+        <p class="eyebrow">OpenDRIVE Map Console</p>
+        <div class="brand-row">
+          <h1>OpenDRIVE 编辑器</h1>
+        </div>
       </div>
-      <div class="toolbar-group">
-        <button type="button" @click="finishRoad">完成道路</button>
-        <button type="button" @click="undoPoint">撤销点</button>
-        <button type="button" @click="deleteRoad">删除选中</button>
-        <button type="button" @click="fitView">适配视图</button>
-      </div>
-      <div class="toolbar-group">
-        <button type="button" @click="runValidate">质检</button>
-        <button type="button" @click="generateAndDownloadXodr">生成并下载XODR</button>
-        <button type="button" @click="pickXodrFile">导入XODR</button>
-        <button type="button" @click="pickBgFile">上传底图</button>
-        <button type="button" @click="openRoadColorDialog">显示设置</button>
+      <div class="toolbar-strip">
+        <section class="tool-cluster">
+          <span class="cluster-label">模式</span>
+          <div class="toolbar-group">
+            <button type="button" class="mode-btn" :class="{ active: mode === 'draw' }" @click="setMode('draw')">绘制</button>
+            <button type="button" class="mode-btn" :class="{ active: mode === 'select' }" @click="setMode('select')">选择</button>
+            <button type="button" class="mode-btn" :class="{ active: mode === 'connect' }" @click="setMode('connect')">连接</button>
+            <button type="button" class="mode-btn" :class="{ active: mode === 'extend' }" @click="setMode('extend')">延伸</button>
+            <button type="button" class="mode-btn" :class="{ active: mode === 'junction' }" @click="setMode('junction')">路口</button>
+          </div>
+        </section>
+        <section class="tool-cluster">
+          <span class="cluster-label">编辑</span>
+          <div class="toolbar-group">
+            <button type="button" @click="finishRoad">完成道路</button>
+            <button type="button" @click="undoPoint">撤销点</button>
+            <button type="button" @click="deleteRoad">删除选中</button>
+            <button type="button" @click="fitView">适配视图</button>
+          </div>
+        </section>
+        <section class="tool-cluster">
+          <span class="cluster-label">数据</span>
+          <div class="toolbar-group">
+            <button type="button" @click="runValidate">质检</button>
+            <button type="button" @click="generateAndDownloadXodr">生成并下载XODR</button>
+            <button type="button" @click="pickXodrFile">导入XODR</button>
+            <button type="button" @click="pickBgFile">上传底图</button>
+            <button type="button" @click="openRoadColorDialog">显示设置</button>
+          </div>
+        </section>
       </div>
       <div class="topbar-status">
-        <span class="status-chip">模式: {{ mode }}</span>
-        <span class="status-chip">道路: {{ roads.length }}</span>
-        <span class="status-chip">已选: {{ selectedRoad ? selectedRoad.id : '-' }}</span>
+        <span class="status-chip">
+          <span class="status-label">模式</span>
+          <strong>{{ mode }}</strong>
+        </span>
+        <span class="status-chip">
+          <span class="status-label">道路</span>
+          <strong>{{ roads.length }}</strong>
+        </span>
+        <span class="status-chip">
+          <span class="status-label">选中</span>
+          <strong>{{ selectedRoad ? selectedRoad.id : '-' }}</strong>
+        </span>
       </div>
     </header>
 
     <aside class="sidebar left-rail">
-      <h1>OpenDRIVE 编辑器</h1>
-      <p class="desc">左侧道路区</p>
+      <div class="rail-header">
+        <p class="eyebrow">Road Index</p>
+        <h2 class="rail-title">道路列表</h2>
+      </div>
       <section class="panel road-panel">
-        <h2>Roads ({{ roads.length }})</h2>
+        <div class="panel-heading">
+          <h2>Roads</h2>
+          <span class="panel-badge">{{ roads.length }}</span>
+        </div>
         <div ref="roadListEl" class="road-list road-list-fill" @scroll="handleRoadListScroll">
           <template v-if="useVirtualRoadList">
             <div class="road-list-spacer" :style="{ height: `${roadListTopPadding}px` }"></div>
-            <button
+            <div
               v-for="row in virtualRoadRows"
               :key="`vroad-${row.road?.id}-${row.index}`"
-              type="button"
               class="road-item road-item-compact"
-              :class="{ selected: row.index === selectedRoadIndex }"
-              @click="selectRoad(row.index)"
+              :class="{ selected: row.index === selectedRoadIndex, muted: !isRoadVisible(row.road) }"
             >
-              <div>Road {{ row.road.id }} | len={{ formatNum(row.road.length, 2) }} | pts={{ row.road.points.length }}</div>
-              <div class="meta">pred={{ row.road.predecessorId || '-' }} | succ={{ row.road.successorId || '-' }}</div>
-            </button>
+              <div class="road-item-main">
+                <button type="button" class="road-item-select" @click="selectRoad(row.index)">
+                  <div>Road {{ row.road.id }} | len={{ formatNum(row.road.length, 2) }} | pts={{ row.road.points.length }}</div>
+                  <div class="meta">pred={{ row.road.predecessorId || '-' }} | succ={{ row.road.successorId || '-' }}</div>
+                </button>
+                <button type="button" class="road-ctrl-btn" @click.stop="toggleRoadVisibility(row.index)">
+                  {{ isRoadVisible(row.road) ? '显示' : '隐藏' }}
+                </button>
+              </div>
+            </div>
             <div class="road-list-spacer" :style="{ height: `${roadListBottomPadding}px` }"></div>
             <div class="meta road-list-hint">大地图模式：已启用虚拟列表，仅渲染可见道路项。</div>
           </template>
           <template v-else>
-            <div v-for="(road, i) in roads" :key="`${road.id}-${i}`" class="road-tree-item">
-              <button
-                type="button"
+            <div v-for="row in roadTreeRows" :key="`${row.road.id}-${row.index}`" class="road-tree-item">
+              <div
                 class="road-item"
-                :class="{ selected: i === selectedRoadIndex }"
-                @click="selectRoad(i)"
+                :class="{ selected: row.index === selectedRoadIndex, muted: !isRoadVisible(row.road) }"
               >
-                <div>Road {{ road.id }} | len={{ formatNum(road.length, 2) }} | pts={{ road.points.length }}</div>
-                <div class="meta">pred={{ road.predecessorId || '-' }} | succ={{ road.successorId || '-' }}</div>
-              </button>
-              <div v-if="getChildRoadEntries(road.id).length" class="child-road-list">
-                <button
-                  v-for="child in getChildRoadEntries(road.id)"
-                  :key="`child-${road.id}-${child.index}`"
-                  type="button"
-                  class="child-road-item"
-                  :class="{ selected: child.index === selectedRoadIndex }"
-                  @click="selectRoad(child.index)"
-                >
-                  ↳ Road {{ child.road.id }} | len={{ formatNum(child.road.length, 2) }} | pts={{ child.road.points.length }}
+                <button type="button" class="road-item-select" @click="selectRoad(row.index)">
+                  <div>Road {{ row.road.id }} | len={{ formatNum(row.road.length, 2) }} | pts={{ row.road.points.length }}</div>
+                  <div class="meta">pred={{ row.road.predecessorId || '-' }} | succ={{ row.road.successorId || '-' }}</div>
                 </button>
+                <div class="road-item-actions">
+                  <button
+                    v-if="hasChildRoadEntries(row.road.id)"
+                    type="button"
+                    class="road-ctrl-btn"
+                    @click.stop="toggleRoadChildren(row.road.id)"
+                  >
+                    {{ isRoadChildrenExpanded(row.road.id) ? '收起' : `子路(${getChildRoadEntries(row.road.id).length})` }}
+                  </button>
+                  <button type="button" class="road-ctrl-btn" @click.stop="toggleRoadVisibility(row.index)">
+                    {{ isRoadVisible(row.road) ? '显示' : '隐藏' }}
+                  </button>
+                </div>
+              </div>
+              <div
+                v-if="hasChildRoadEntries(row.road.id) && isRoadChildrenExpanded(row.road.id)"
+                class="child-road-list"
+              >
+                <div
+                  v-for="child in getChildRoadEntries(row.road.id)"
+                  :key="`child-${row.road.id}-${child.index}`"
+                  class="child-road-item"
+                  :class="{ selected: child.index === selectedRoadIndex, muted: !isRoadVisible(child.road) }"
+                >
+                  <button type="button" class="road-item-select" @click="selectRoad(child.index)">
+                    <div>Road {{ child.road.id }} | len={{ formatNum(child.road.length, 2) }} | pts={{ child.road.points.length }}</div>
+                  </button>
+                  <button type="button" class="road-ctrl-btn" @click.stop="toggleRoadVisibility(child.index)">
+                    {{ isRoadVisible(child.road) ? '显示' : '隐藏' }}
+                  </button>
+                </div>
               </div>
             </div>
           </template>
@@ -84,18 +139,29 @@
     </aside>
 
     <section class="viewer center-stage">
-      <div ref="canvasWrap" class="canvas-wrap">
-        <canvas ref="canvasEl" class="canvas-el" width="1280" height="720" />
+      <div class="stage-shell">
+        <div class="stage-head">
+          <div>
+            <p class="eyebrow">Workspace</p>
+            <h2>道路画布</h2>
+          </div>
+          <div class="stage-metrics">
+            <span>坐标 x={{ formatNum(mouseWorld.x, 2) }}</span>
+            <span>坐标 y={{ formatYUp(mouseWorld.y) }}</span>
+            <span>yaw={{ formatNum(bgGeo.yaw, 3) }}</span>
+          </div>
+        </div>
+        <div ref="canvasWrap" class="canvas-wrap">
+          <canvas ref="canvasEl" class="canvas-el" width="1280" height="720" />
+        </div>
       </div>
       <div class="stage-tip">
         左键交互，滚轮缩放，空格+拖动平移，选择模式可拖当前道路控制点
-        | 鼠标: x={{ formatNum(mouseWorld.x, 2) }}, y={{ formatYUp(mouseWorld.y) }}
         | 原点: x={{ formatNum(bgGeo.originX, 2) }}, y={{ formatYUp(bgGeo.originY) }}, yaw={{ formatNum(bgGeo.yaw, 3) }}
       </div>
     </section>
 
     <aside class="sidebar right-rail">
-      <p class="desc">右侧属性区</p>
       <section class="panel">
         <h2>Header</h2>
         <div class="grid2">
@@ -313,6 +379,12 @@ const {
   selectedRoadIndex,
   formatNum,
   getChildRoadEntries,
+  hasChildRoadEntries,
+  isRoadChildrenExpanded,
+  toggleRoadChildren,
+  isRoadVisible,
+  toggleRoadVisibility,
+  roadTreeRows,
   selectRoad,
   roadListEl,
   handleRoadListScroll,

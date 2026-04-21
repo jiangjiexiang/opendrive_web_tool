@@ -146,6 +146,7 @@ let roadListResizeObserver = null;
 let renderFrame = 0;
 const roadListScrollTop = ref(0);
 const roadListViewportHeight = ref(320);
+const collapsedRoadGroups = ref({});
 
 const selectedRoad = computed(() => roads.value[selectedRoadIndex.value] || null);
 const useVirtualRoadList = computed(() => roads.value.length >= 500);
@@ -193,6 +194,22 @@ const childRoadEntriesByParent = computed(() => {
     }
   });
   return map;
+});
+const childRoadIds = computed(() => {
+  const ids = new Set();
+  Object.values(childRoadEntriesByParent.value).forEach((entries) => {
+    (entries || []).forEach((entry) => {
+      const id = String(entry?.road?.id ?? '');
+      if (id) ids.add(id);
+    });
+  });
+  return ids;
+});
+const roadTreeRows = computed(() => {
+  const rows = roads.value
+    .map((road, index) => ({ road, index }))
+    .filter(({ road }) => !childRoadIds.value.has(String(road?.id ?? '')));
+  return rows.length ? rows : roads.value.map((road, index) => ({ road, index }));
 });
 
 watch(selectedRoad, (road) => {
@@ -246,6 +263,40 @@ function getChildrenText(roadId) {
 
 function getChildRoadEntries(roadId) {
   return childRoadEntriesByParent.value[String(roadId)] || [];
+}
+
+function hasChildRoadEntries(roadId) {
+  return getChildRoadEntries(roadId).length > 0;
+}
+
+function isRoadChildrenExpanded(roadId) {
+  return Boolean(collapsedRoadGroups.value[String(roadId)]);
+}
+
+function toggleRoadChildren(roadId) {
+  const sid = String(roadId ?? '').trim();
+  if (!sid || !hasChildRoadEntries(sid)) return;
+  collapsedRoadGroups.value = {
+    ...(collapsedRoadGroups.value || {}),
+    [sid]: !isRoadChildrenExpanded(sid)
+  };
+}
+
+function isRoadVisible(road) {
+  return road?.visible !== false;
+}
+
+function toggleRoadVisibility(index) {
+  const road = roads.value[index];
+  if (!road) return;
+  road.visible = road.visible === false;
+  if (road.visible === false && selectedRoadIndex.value === index) {
+    connectDraft.value = { first: null, second: null };
+    extendDraft.value = null;
+    junctionDraft.value = { handles: [] };
+    endpointDrag.value = null;
+  }
+  render();
 }
 
 function getConnectHandleText(handle) {
@@ -457,6 +508,7 @@ function pickRoad(worldPoint) {
   let best = { idx: -1, score: Infinity };
   const nearMargin = 30 / Math.max(0.1, view.scale);
   roads.value.forEach((r, idx) => {
+    if (r?.visible === false) return;
     if (!r.points || r.points.length < 2) return;
     const bounds = getRoadBounds(r);
     if (bounds) {
@@ -1159,6 +1211,7 @@ function performRender() {
   const visibleRoads = [];
   let visiblePointCount = 0;
   roads.value.forEach((r, idx) => {
+    if (r?.visible === false) return;
     const bounds = getRoadBounds(r);
     if (bounds && viewportBounds && !boundsIntersect(bounds, viewportBounds)) return;
     visibleRoads.push({ road: r, idx });
@@ -1267,6 +1320,7 @@ function fitView() {
   } else if (roads.value.length) {
     let minX = Infinity; let minY = Infinity; let maxX = -Infinity; let maxY = -Infinity;
     roads.value.forEach((r) => {
+      if (r?.visible === false) return;
       (r.points || []).forEach((p) => {
         if (p.x < minX) minX = p.x;
         if (p.y < minY) minY = p.y;
@@ -1324,6 +1378,7 @@ function defaultRoadFromPoints(points) {
     nativeLeftBoundary: null,
     nativeRightBoundary: null,
     nativeLaneBoundaries: null,
+    visible: true,
     geometry: [],
     length: polylineLength(points)
   };
@@ -2879,6 +2934,7 @@ function rebuildConnectorsLinkedToRoad(roadId) {
 function getAllHandles() {
   const handles = [];
   roads.value.forEach((road, roadIdx) => {
+    if (road?.visible === false) return;
     const start = roadPoseAtEnd(road, true);
     const end = roadPoseAtEnd(road, false);
     if (start) handles.push({ roadIdx, endpoint: 'start', ...start });
@@ -2905,6 +2961,7 @@ function pickSelectedRoadEditPoint(screenX, screenY) {
   const road = selectedRoad.value;
   const roadIdx = selectedRoadIndex.value;
   if (!road || roadIdx < 0) return null;
+  if (road.visible === false) return null;
   const editPoints = getRoadEditPoints(road);
   let best = null;
   let bestDist = Infinity;
@@ -3185,6 +3242,7 @@ function applyNativeRoads(parsedRoads, importedJunctions = [], importedRoadDetai
     nativeLeftBoundary: Array.isArray(r.nativeLeftBoundary) ? r.nativeLeftBoundary.map((p) => ({ x: Number(p.x), y: Number(p.y) })) : [],
     nativeRightBoundary: Array.isArray(r.nativeRightBoundary) ? r.nativeRightBoundary.map((p) => ({ x: Number(p.x), y: Number(p.y) })) : [],
     nativeLaneBoundaries: Array.isArray(r.nativeLaneBoundaries) ? r.nativeLaneBoundaries : [],
+    visible: r.visible !== false,
     length: Number.isFinite(Number(r.length)) ? Number(r.length) : polylineLength(r.points || [])
   }));
   normalized.forEach((road) => {
@@ -3594,6 +3652,12 @@ onBeforeUnmount(() => {
     selectedRoadIndex,
     formatNum,
     getChildRoadEntries,
+    hasChildRoadEntries,
+    isRoadChildrenExpanded,
+    toggleRoadChildren,
+    isRoadVisible,
+    toggleRoadVisibility,
+    roadTreeRows,
     selectRoad,
     roadListEl,
     handleRoadListScroll,
