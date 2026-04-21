@@ -149,6 +149,7 @@
             <span>坐标 x={{ formatNum(mouseWorld.x, 2) }}</span>
             <span>坐标 y={{ formatYUp(mouseWorld.y) }}</span>
             <span>yaw={{ formatNum(bgGeo.yaw, 3) }}</span>
+            <span v-if="hoverRoadCoord.roadId">Road {{ hoverRoadCoord.roadId }} | s={{ formatNum(hoverRoadCoord.s, 2) }} | t={{ formatNum(hoverRoadCoord.t, 2) }}</span>
           </div>
         </div>
         <div ref="canvasWrap" class="canvas-wrap">
@@ -403,6 +404,7 @@ const {
   mouseWorld,
   formatYUp,
   bgGeo,
+  hoverRoadCoord,
     roadColorDialog,
   closeRoadColorDialog,
   applyRoadColorDialog,

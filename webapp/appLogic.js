@@ -43,6 +43,12 @@ const junctionMeshes = ref([]);
 const junctionSpecs = ref([]);
 const bgImage = ref(null);
 const mouseWorld = reactive({ x: 0, y: 0 });
+const hoverRoadCoord = reactive({
+  roadId: '',
+  s: null,
+  t: null,
+  distance: null
+});
 const bgGeo = reactive({
   resolution: 1,
   originX: 0,
@@ -475,6 +481,86 @@ function distPointToSeg(p, a, b) {
   const px = a.x + t * vx;
   const py = a.y + t * vy;
   return Math.hypot(p.x - px, p.y - py);
+}
+
+function projectPointToSeg(p, a, b) {
+  const vx = b.x - a.x;
+  const vy = b.y - a.y;
+  const segLenSq = vx * vx + vy * vy;
+  if (segLenSq <= 1e-10) {
+    return {
+      x: a.x,
+      y: a.y,
+      ratio: 0,
+      distance: Math.hypot(p.x - a.x, p.y - a.y),
+      signedOffset: 0
+    };
+  }
+  const wx = p.x - a.x;
+  const wy = p.y - a.y;
+  const rawRatio = (vx * wx + vy * wy) / segLenSq;
+  const ratio = clamp(rawRatio, 0, 1);
+  const projX = a.x + vx * ratio;
+  const projY = a.y + vy * ratio;
+  const dx = p.x - projX;
+  const dy = p.y - projY;
+  const segLen = Math.sqrt(segLenSq);
+  const leftNormalX = -vy / segLen;
+  const leftNormalY = vx / segLen;
+  return {
+    x: projX,
+    y: projY,
+    ratio,
+    distance: Math.hypot(dx, dy),
+    signedOffset: dx * leftNormalX + dy * leftNormalY
+  };
+}
+
+function projectPointToRoadST(p, road) {
+  const pts = Array.isArray(road?.points) ? road.points : [];
+  if (pts.length < 2) return null;
+  let best = null;
+  let accS = 0;
+  for (let i = 1; i < pts.length; i += 1) {
+    const a = pts[i - 1];
+    const b = pts[i];
+    const segLen = Math.hypot(b.x - a.x, b.y - a.y);
+    if (segLen <= 1e-8) continue;
+    const projected = projectPointToSeg(p, a, b);
+    const candidate = {
+      roadId: String(road.id ?? ''),
+      s: accS + projected.ratio * segLen,
+      t: projected.signedOffset,
+      distance: projected.distance
+    };
+    if (!best || candidate.distance < best.distance) {
+      best = candidate;
+    }
+    accS += segLen;
+  }
+  return best;
+}
+
+function updateHoverRoadCoord(worldPoint) {
+  const maxDistance = Math.max(2.5, 24 / Math.max(0.1, view.scale));
+  let best = null;
+  roads.value.forEach((road) => {
+    if (road?.visible === false) return;
+    const projected = projectPointToRoadST(worldPoint, road);
+    if (!projected) return;
+    if (!best || projected.distance < best.distance) best = projected;
+  });
+  if (!best || best.distance > maxDistance) {
+    hoverRoadCoord.roadId = '';
+    hoverRoadCoord.s = null;
+    hoverRoadCoord.t = null;
+    hoverRoadCoord.distance = null;
+    return;
+  }
+  hoverRoadCoord.roadId = best.roadId;
+  hoverRoadCoord.s = best.s;
+  hoverRoadCoord.t = best.t;
+  hoverRoadCoord.distance = best.distance;
 }
 
 function distPointToPolyline(p, points) {
@@ -3512,6 +3598,7 @@ function handleMouseMove(e) {
     const rect = canvasEl.value.getBoundingClientRect();
     mouseWorld.x = (e.clientX - rect.left - view.offsetX) / view.scale;
     mouseWorld.y = (e.clientY - rect.top - view.offsetY) / view.scale;
+    updateHoverRoadCoord(mouseWorld);
   }
   if (!canvasEl.value || !extendDraft.value || mode.value !== 'extend') return;
   const rect = canvasEl.value.getBoundingClientRect();
@@ -3676,6 +3763,7 @@ onBeforeUnmount(() => {
     mouseWorld,
     formatYUp,
     bgGeo,
+    hoverRoadCoord,
     roadColorDialog,
     closeRoadColorDialog,
     applyRoadColorDialog,
