@@ -252,7 +252,7 @@ function formatNum(v, digits = 2) {
 
 function formatYUp(v, digits = 2) {
   const n = Number(v);
-  return Number.isFinite(n) ? (-n).toFixed(digits) : '-';
+  return Number.isFinite(n) ? n.toFixed(digits) : '-';
 }
 
 function getChildrenText(roadId) {
@@ -461,11 +461,11 @@ function polylineLength(points) {
 }
 
 function worldToScreen(x, y) {
-  return { x: x * view.scale + view.offsetX, y: y * view.scale + view.offsetY };
+  return { x: x * view.scale + view.offsetX, y: -y * view.scale + view.offsetY };
 }
 
 function screenToWorld(x, y) {
-  return { x: (x - view.offsetX) / view.scale, y: (y - view.offsetY) / view.scale };
+  return { x: (x - view.offsetX) / view.scale, y: (view.offsetY - y) / view.scale };
 }
 
 function distPointToSeg(p, a, b) {
@@ -1065,7 +1065,7 @@ function drawMeterGrid() {
   for (let y = startY; y <= endY; y += stepM) {
     yCount += 1;
     if (yCount > maxGridLines) break;
-    const sy = y * view.scale + view.offsetY;
+    const sy = -y * view.scale + view.offsetY;
     const idx = Math.round(y / stepM);
     const isMajor = idx % majorEvery === 0;
     drawLine(isMajor);
@@ -1282,9 +1282,9 @@ function performRender() {
     ctx.save();
     ctx.transform(
       ex.x * view.scale,
-      ex.y * view.scale,
+      -ex.y * view.scale,
       ey.x * view.scale,
-      ey.y * view.scale,
+      -ey.y * view.scale,
       p.x,
       p.y
     );
@@ -1366,7 +1366,7 @@ function resizeCanvas(keepWorldCenter = true) {
   canvasEl.value.height = newHeight;
   if (keepWorldCenter) {
     view.offsetX = canvasEl.value.width / 2 - prevCenterWorld.x * view.scale;
-    view.offsetY = canvasEl.value.height / 2 - prevCenterWorld.y * view.scale;
+    view.offsetY = canvasEl.value.height / 2 + prevCenterWorld.y * view.scale;
   }
   render();
 }
@@ -1402,7 +1402,7 @@ function fitView() {
     const sy = (canvasEl.value.height - margin * 2) / h;
     view.scale = Math.max(0.00001, Math.min(sx, sy));
     view.offsetX = margin - minX * view.scale + (canvasEl.value.width - margin * 2 - w * view.scale) / 2;
-    view.offsetY = margin - minY * view.scale + (canvasEl.value.height - margin * 2 - h * view.scale) / 2;
+    view.offsetY = margin + maxY * view.scale + (canvasEl.value.height - margin * 2 - h * view.scale) / 2;
   } else if (roads.value.length) {
     let minX = Infinity; let minY = Infinity; let maxX = -Infinity; let maxY = -Infinity;
     roads.value.forEach((r) => {
@@ -1422,7 +1422,7 @@ function fitView() {
       const sy = (canvasEl.value.height - margin * 2) / h;
       view.scale = Math.max(0.00001, Math.min(sx, sy));
       view.offsetX = margin - minX * view.scale + (canvasEl.value.width - margin * 2 - w * view.scale) / 2;
-      view.offsetY = margin - minY * view.scale + (canvasEl.value.height - margin * 2 - h * view.scale) / 2;
+      view.offsetY = margin + maxY * view.scale + (canvasEl.value.height - margin * 2 - h * view.scale) / 2;
     }
   } else {
     const defaultSpanM = 100;
@@ -3596,8 +3596,9 @@ function handleMouseMove(e) {
   }
   if (canvasEl.value) {
     const rect = canvasEl.value.getBoundingClientRect();
-    mouseWorld.x = (e.clientX - rect.left - view.offsetX) / view.scale;
-    mouseWorld.y = (e.clientY - rect.top - view.offsetY) / view.scale;
+    const world = screenToWorld(e.clientX - rect.left, e.clientY - rect.top);
+    mouseWorld.x = world.x;
+    mouseWorld.y = world.y;
     updateHoverRoadCoord(mouseWorld);
   }
   if (!canvasEl.value || !extendDraft.value || mode.value !== 'extend') return;
