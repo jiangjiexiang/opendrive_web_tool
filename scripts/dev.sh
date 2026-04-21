@@ -14,9 +14,6 @@ if [ ! -x "native/bin/odr_json_parser" ]; then
   npm run build:native
 fi
 
-echo "[dev] 同步 VTS 原版 mapcheck/route_test..."
-./scripts/sync_vts_bins.sh || true
-
 echo "[dev] 启动后端: http://localhost:5174"
 npm run dev:server >/tmp/opendrive_backend.log 2>&1 &
 BACKEND_PID=$!

@@ -42,8 +42,8 @@ export async function runQualityCheck({
     progressTimer = setInterval(() => {
       if (!dialog.checking) return;
       dialog.progress = Math.min(92, dialog.progress + 7);
-      if (dialog.progress < 45) dialog.progressText = '正在执行地图一致性质检...';
-      else if (dialog.progress < 80) dialog.progressText = '正在执行 route 质检...';
+      if (dialog.progress < 45) dialog.progressText = '正在执行地图规则质检...';
+      else if (dialog.progress < 80) dialog.progressText = '正在执行连通性质检...';
       else dialog.progressText = '正在汇总质检结果...';
     }, 260);
 

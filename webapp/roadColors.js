@@ -6,12 +6,16 @@ export function createRoadColorState() {
       visible: false,
       allColor: '#3a92ff',
       junctionColor: '#ff9b42',
-      junctionGuideColor: '#ffdd9b'
+      junctionGuideColor: '#ffdd9b',
+      showRoadLabels: true,
+      roadLabelColor: '#111111'
     }),
     roadColorConfig: reactive({
       allColor: '#3a92ff',
       junctionColor: '#ff9b42',
-      junctionGuideColor: '#ffdd9b'
+      junctionGuideColor: '#ffdd9b',
+      showRoadLabels: true,
+      roadLabelColor: '#111111'
     })
   };
 }
@@ -20,6 +24,8 @@ export function openRoadColorDialog(dialog, config) {
   dialog.allColor = config.allColor;
   dialog.junctionColor = config.junctionColor;
   dialog.junctionGuideColor = config.junctionGuideColor;
+  dialog.showRoadLabels = Boolean(config.showRoadLabels);
+  dialog.roadLabelColor = config.roadLabelColor;
   dialog.visible = true;
 }
 
@@ -31,6 +37,8 @@ export function applyRoadColorDialog(dialog, config) {
   config.allColor = dialog.allColor;
   config.junctionColor = dialog.junctionColor;
   config.junctionGuideColor = dialog.junctionGuideColor;
+  config.showRoadLabels = Boolean(dialog.showRoadLabels);
+  config.roadLabelColor = dialog.roadLabelColor;
   dialog.visible = false;
 }
 
@@ -38,6 +46,8 @@ export function resetRoadColorDialogDefaults(dialog) {
   dialog.allColor = '#3a92ff';
   dialog.junctionColor = '#ff9b42';
   dialog.junctionGuideColor = '#ffdd9b';
+  dialog.showRoadLabels = true;
+  dialog.roadLabelColor = '#111111';
 }
 
 function hexToRgba(hex, alpha) {

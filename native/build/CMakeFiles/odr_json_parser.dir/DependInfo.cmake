@@ -1,22 +1,23 @@
-
-# Consider dependencies only in project.
-set(CMAKE_DEPENDS_IN_PROJECT_ONLY OFF)
-
 # The set of languages for which implicit dependencies are needed:
 set(CMAKE_DEPENDS_LANGUAGES
+  "CXX"
+  )
+# The set of files for implicit dependencies of each language:
+set(CMAKE_DEPENDS_CHECK_CXX
+  "/home/jiang/workspace/opendrive_web_tool/native/odr_json_parser.cpp" "/home/jiang/workspace/opendrive_web_tool/native/build/CMakeFiles/odr_json_parser.dir/odr_json_parser.cpp.o"
+  )
+set(CMAKE_CXX_COMPILER_ID "GNU")
+
+# The include file search paths:
+set(CMAKE_CXX_TARGET_INCLUDE_PATH
+  "../libOpenDRIVE/include"
+  "_deps/pugixml-src/src"
   )
 
-# The set of dependency files which are needed:
-set(CMAKE_DEPENDS_DEPENDENCY_FILES
-  "/Users/jiang/Desktop/web/opendrive_web_tool/native/odr_json_parser.cpp" "CMakeFiles/odr_json_parser.dir/odr_json_parser.cpp.o" "gcc" "CMakeFiles/odr_json_parser.dir/odr_json_parser.cpp.o.d"
-  )
-
-# Targets to which this target links which contain Fortran sources.
-set(CMAKE_Fortran_TARGET_LINKED_INFO_FILES
-  )
-
-# Targets to which this target links which contain Fortran sources.
-set(CMAKE_Fortran_TARGET_FORWARD_LINKED_INFO_FILES
+# Targets to which this target links.
+set(CMAKE_TARGET_LINKED_INFO_FILES
+  "/home/jiang/workspace/opendrive_web_tool/native/build/libOpenDRIVE/CMakeFiles/OpenDrive.dir/DependInfo.cmake"
+  "/home/jiang/workspace/opendrive_web_tool/native/build/_deps/pugixml-build/CMakeFiles/pugixml-static.dir/DependInfo.cmake"
   )
 
 # Fortran module output directory.

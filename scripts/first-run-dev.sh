@@ -86,10 +86,7 @@ else
 fi
 
 echo "[first-run] 编译 native 解析器（首次建议强制编译一次）..."
-npm run build:native
-
-echo "[first-run] 同步 mapcheck/route_test（如存在）..."
-./scripts/sync_vts_bins.sh || true
+bash ./scripts/build-native.sh
 
 echo "[first-run] 环境准备完成，启动开发服务..."
 exec ./scripts/dev.sh

@@ -1,1 +1,1 @@
-/usr/bin/c++  -arch arm64 -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/odr_json_parser.dir/odr_json_parser.cpp.o -o /Users/jiang/Desktop/web/opendrive_web_tool/native/bin/odr_json_parser  -Wl,-rpath,/opt/homebrew/lib libOpenDRIVE/libOpenDrive.a /opt/homebrew/lib/libpugixml.1.15.dylib
+/usr/bin/c++     CMakeFiles/odr_json_parser.dir/odr_json_parser.cpp.o  -o ../bin/odr_json_parser  libOpenDRIVE/libOpenDrive.a _deps/pugixml-build/libpugixml.a 

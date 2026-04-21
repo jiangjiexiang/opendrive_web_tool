@@ -12,24 +12,9 @@ const { validateMapSpec, validateRouteConnectivity } = require('./vtsRules');
 const publicDir = path.join(__dirname, '..', 'public');
 const distDir = path.join(__dirname, '..', 'dist');
 const nativeParserPath = path.join(__dirname, '..', 'native', 'bin', 'odr_json_parser');
-const vtsRuntimeDir = path.join(__dirname, '..', '..', 'vts_map_interface', 'build_unix', 'runtime');
-const mapcheckCandidates = [
-  process.env.MAPCHECK_BIN ? String(process.env.MAPCHECK_BIN).trim() : '',
-  path.join(__dirname, '..', 'native', 'bin', 'check_map'),
-  path.join(__dirname, '..', 'native', 'bin', 'mapcheck'),
-  path.join(vtsRuntimeDir, 'VTSMapCheckApp'),
-  'check_map'
-].filter(Boolean);
-const routeTestCandidates = [
-  process.env.MAPROUTE_BIN ? String(process.env.MAPROUTE_BIN).trim() : '',
-  process.env.ROUTE_TEST_BIN ? String(process.env.ROUTE_TEST_BIN).trim() : '',
-  path.join(__dirname, '..', 'native', 'bin', 'route_test'),
-  path.join(vtsRuntimeDir, 'VTSMapRouteApp'),
-  'route_test'
-].filter(Boolean);
 const staticDir = fs.existsSync(distDir) ? distDir : publicDir;
 const port = Number(process.env.BACKEND_PORT || process.env.PORT || 5173);
-const validationMode = String(process.env.VALIDATION_MODE || 'auto').trim().toLowerCase();
+const validationMode = 'js';
 
 function sendJson(res, statusCode, payload) {
   res.writeHead(statusCode, {
@@ -87,232 +72,33 @@ function parseXodrNative(xmlText, eps = 0.2) {
   });
 }
 
-function looksLikePath(s) {
-  return s.includes('/') || s.includes('\\');
-}
-
-function classifyMapcheckOutput(rawOutput) {
-  const lines = String(rawOutput || '')
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
-
-  const errors = [];
-  const warnings = [];
-
-  for (const line of lines) {
-    const lower = line.toLowerCase();
-    if (lower.includes('no error/warn message')) {
-      continue;
-    }
-    if (lower.includes('warning') || lower.includes('[ warning ]')) {
-      warnings.push(line);
-      continue;
-    }
-    if (lower.includes('error') || lower.includes('[ error ]')) {
-      errors.push(line);
-    }
-  }
-
-  const uniqErrors = [...new Set(errors)];
-  const uniqWarnings = [...new Set(warnings)];
-  return {
-    errors: uniqErrors,
-    warnings: uniqWarnings,
-    errorCount: uniqErrors.length,
-    warningCount: uniqWarnings.length,
-    ok: uniqErrors.length === 0,
-    rawOutput: String(rawOutput || '')
-  };
-}
-
-function runMapcheckOnXodr(xodrText) {
-  return new Promise((resolve, reject) => {
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'odr-check-'));
-    const tempFile = path.join(tempDir, 'map.xodr');
-    fs.writeFileSync(tempFile, String(xodrText || ''), 'utf8');
-
-    const tryRun = (idx) => {
-      if (idx >= mapcheckCandidates.length) {
-        const hint = process.env.MAPCHECK_BIN
-          ? `MAPCHECK_BIN=${process.env.MAPCHECK_BIN}`
-          : 'native/bin/check_map 或设置环境变量 MAPCHECK_BIN';
-        try { fs.unlinkSync(tempFile); } catch (_) {}
-        try { fs.rmdirSync(tempDir); } catch (_) {}
-        reject(new Error(`未找到可用的原版 mapcheck/check_map。请安装后重试（${hint}）。`));
-        return;
-      }
-
-      const bin = mapcheckCandidates[idx];
-      if (looksLikePath(bin) && !fs.existsSync(bin)) {
-        tryRun(idx + 1);
-        return;
-      }
-
-      execFile(
-        bin,
-        [tempFile],
-        { maxBuffer: 50 * 1024 * 1024 },
-        (error, stdout, stderr) => {
-          const raw = [stdout || '', stderr || ''].filter(Boolean).join('\n').trim();
-          const classified = classifyMapcheckOutput(raw);
-
-          if (error) {
-            if (error.code === 'ENOENT') {
-              tryRun(idx + 1);
-              return;
-            }
-            if (!raw) {
-              try { fs.unlinkSync(tempFile); } catch (_) {}
-              try { fs.rmdirSync(tempDir); } catch (_) {}
-              reject(new Error(`原版 mapcheck 执行失败: ${String(error.message || error)}`));
-              return;
-            }
-          }
-
-          try { fs.unlinkSync(tempFile); } catch (_) {}
-          try { fs.rmdirSync(tempDir); } catch (_) {}
-
-          resolve({
-            ...classified,
-            tool: bin
-          });
-        }
-      );
-    };
-
-    tryRun(0);
-  });
-}
-
-function classifyRouteTestOutput(rawOutput) {
-  const lines = String(rawOutput || '')
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
-
-  const errors = [];
-  const fatalPatterns = [
-    /start road has no successor/i,
-    /has no successor/i,
-    /has no predecessor/i,
-    /not enough valid roads/i,
-    /load map failed/i,
-    /route(?:\s|_)*(?:failed|error|not found|no data|empty)/i
-  ];
-  let summary = null;
-  for (const line of lines) {
-    if (/^\[\s*FAIL\s*\]/i.test(line)) {
-      errors.push(line);
-      continue;
-    }
-    if (fatalPatterns.some((re) => re.test(line))) {
-      errors.push(line);
-      continue;
-    }
-    const match = line.match(/summary:\s*ok=(\d+),\s*fail=(\d+),\s*total=(\d+),\s*sample_fail=(\d+)/i);
-    if (match) {
-      summary = {
-        ok: Number(match[1] || 0),
-        fail: Number(match[2] || 0),
-        total: Number(match[3] || 0),
-        sampleFail: Number(match[4] || 0)
-      };
-    }
-  }
-
-  if (!summary) {
-    errors.push('[ROUTE] route_test summary not found (treated as failure)');
-  } else if (summary.total <= 0) {
-    errors.push('[ROUTE] route_test summary total=0 (no routable samples)');
-  } else if (summary.ok <= 0) {
-    errors.push('[ROUTE] route_test summary ok=0 (no successful routes)');
-  }
-
-  const warnings = [];
-  if (summary) {
-    warnings.push(`[ROUTE] summary: ok=${summary.ok}, fail=${summary.fail}, total=${summary.total}, sample_fail=${summary.sampleFail}`);
-  }
-
-  const uniqErrors = [...new Set(errors)];
-  const uniqWarnings = [...new Set(warnings)];
-  return {
-    errors: uniqErrors,
-    warnings: uniqWarnings,
-    errorCount: uniqErrors.length,
-    warningCount: uniqWarnings.length,
-    ok: uniqErrors.length === 0 && (!summary || Number(summary.fail || 0) === 0),
-    summary,
-    rawOutput: String(rawOutput || '')
-  };
-}
-
-function runRouteTestOnXodr(xodrText) {
-  return new Promise((resolve, reject) => {
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'odr-route-'));
-    const tempFile = path.join(tempDir, 'map.xodr');
-    fs.writeFileSync(tempFile, String(xodrText || ''), 'utf8');
-
-    const tryRun = (idx) => {
-      if (idx >= routeTestCandidates.length) {
-        const hint = process.env.MAPROUTE_BIN || process.env.ROUTE_TEST_BIN
-          ? `MAPROUTE_BIN=${process.env.MAPROUTE_BIN || process.env.ROUTE_TEST_BIN}`
-          : 'native/bin/route_test 或设置环境变量 MAPROUTE_BIN';
-        try { fs.unlinkSync(tempFile); } catch (_) {}
-        try { fs.rmdirSync(tempDir); } catch (_) {}
-        reject(new Error(`未找到可用的原版 route_test。请安装后重试（${hint}）。`));
-        return;
-      }
-
-      const bin = routeTestCandidates[idx];
-      if (looksLikePath(bin) && !fs.existsSync(bin)) {
-        tryRun(idx + 1);
-        return;
-      }
-
-      execFile(
-        bin,
-        [tempFile],
-        { maxBuffer: 50 * 1024 * 1024 },
-        (error, stdout, stderr) => {
-          const raw = [stdout || '', stderr || ''].filter(Boolean).join('\n').trim();
-          const classified = classifyRouteTestOutput(raw);
-
-          if (error) {
-            if (error.code === 'ENOENT') {
-              tryRun(idx + 1);
-              return;
-            }
-            if (!raw) {
-              try { fs.unlinkSync(tempFile); } catch (_) {}
-              try { fs.rmdirSync(tempDir); } catch (_) {}
-              reject(new Error(`原版 route_test 执行失败: ${String(error.message || error)}`));
-              return;
-            }
-          }
-
-          try { fs.unlinkSync(tempFile); } catch (_) {}
-          try { fs.rmdirSync(tempDir); } catch (_) {}
-
-          resolve({
-            ...classified,
-            tool: bin
-          });
-        }
-      );
-    };
-
-    tryRun(0);
-  });
-}
-
 function runJsValidation(spec) {
   const mapcheck = validateMapSpec(spec || {});
   const route = validateRouteConnectivity(spec || {});
+  const formatLines = (title, result, summaryText = '') => {
+    const lines = [title];
+    const errors = Array.isArray(result?.errors) ? result.errors : [];
+    const warnings = Array.isArray(result?.warnings) ? result.warnings : [];
+    const logs = Array.isArray(result?.logs) ? result.logs : [];
+    if (summaryText) lines.push(summaryText);
+    if (logs.length) {
+      logs.forEach((item) => lines.push(String(item)));
+    }
+    if (!errors.length && !warnings.length && !logs.length) {
+      lines.push('[ OK ] no error/warn message');
+    } else {
+      warnings.forEach((item) => lines.push(String(item)));
+      errors.forEach((item) => lines.push(String(item)));
+    }
+    return lines.join('\n');
+  };
+  const routeSummary = route?.summary
+    ? `[ROUTE] summary: ok=${Number(route.summary.ok || 0)}, fail=${Number(route.summary.fail || 0)}, total=${Number(route.summary.total || 0)}, sample_fail=${Number(route.summary.sampleFail || 0)}`
+    : '';
   return {
     mapcheck: {
       ...mapcheck,
-      rawOutput: '[JS] mapcheck fallback',
+      rawOutput: formatLines('[JS] mapcheck via vtsRules', mapcheck),
       tool: 'js-mapcheck'
     },
     route: {
@@ -322,18 +108,10 @@ function runJsValidation(spec) {
       errorCount: Array.isArray(route.errors) ? route.errors.length : 0,
       warningCount: Array.isArray(route.warnings) ? route.warnings.length : 0,
       summary: route.summary || null,
-      rawOutput: '[JS] route_test fallback',
-      tool: 'js-route-test'
+      rawOutput: formatLines('[JS] route validation via vtsRules', route, routeSummary),
+      tool: 'js-route-rules'
     }
   };
-}
-
-function isToolNotFoundError(err) {
-  const msg = String(err?.message || err || '').toLowerCase();
-  return msg.includes('未找到可用的原版')
-    || msg.includes('enoent')
-    || msg.includes('mapcheck_bin')
-    || msg.includes('maproute_bin');
 }
 
 function serveStatic(req, res) {
@@ -392,28 +170,9 @@ const server = http.createServer(async (req, res) => {
       const payload = JSON.parse(body || '{}');
       const xodrFromPayload = typeof payload.xodr === 'string' ? payload.xodr.trim() : '';
       const xodr = xodrFromPayload || buildXodr(payload);
-      let mapcheck;
-      let routeTest;
-      let modeUsed = validationMode;
-      if (validationMode === 'js') {
-        const js = runJsValidation(payload);
-        mapcheck = js.mapcheck;
-        routeTest = js.route;
-      } else {
-        try {
-          mapcheck = await runMapcheckOnXodr(xodr);
-          routeTest = await runRouteTestOnXodr(xodr);
-          modeUsed = 'native';
-        } catch (error) {
-          if (validationMode === 'native' || !isToolNotFoundError(error)) {
-            throw error;
-          }
-          const js = runJsValidation(payload);
-          mapcheck = js.mapcheck;
-          routeTest = js.route;
-          modeUsed = 'js-fallback';
-        }
-      }
+      const js = runJsValidation(payload);
+      const mapcheck = js.mapcheck;
+      const routeTest = js.route;
 
       const errors = [...(mapcheck.errors || []), ...(routeTest.errors || [])];
       const warnings = [...(mapcheck.warnings || []), ...(routeTest.warnings || [])];
@@ -425,7 +184,7 @@ const server = http.createServer(async (req, res) => {
         warnings,
         inputMode: xodrFromPayload ? 'raw_xodr' : 'generated_from_spec',
         inputLength: xodr.length,
-        validationMode: modeUsed,
+        validationMode,
         mapcheckTool: mapcheck.tool || '',
         routeTool: routeTest.tool || '',
         routeSummary: routeTest.summary || null,
@@ -468,11 +227,6 @@ const server = http.createServer(async (req, res) => {
       const payload = JSON.parse(body || '{}');
       const xml = String(payload.xml || '');
       const eps = Number(payload.eps);
-      if (!xml.trim()) {
-        sendJson(res, 400, { error: 'xml is required' });
-        return;
-      }
-
       const parsed = await parseXodrNative(xml, Number.isFinite(eps) ? eps : 0.2);
       sendJson(res, 200, parsed);
     } catch (error) {
@@ -485,5 +239,6 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(port, () => {
-  console.log(`OpenDRIVE backend is running at http://localhost:${port}`);
+  console.log(`OpenDRIVE web tool server running at http://localhost:${port}`);
+  console.log(`Validation mode: ${validationMode} (vtsRules JS)`);
 });

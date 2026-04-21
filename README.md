@@ -9,6 +9,7 @@
 - `webapp/`：Vue 前端入口与样式
 - `public/editor-legacy.html`：现有地图编辑器（完整能力保留）
 - `src/server.js`：Node 后端 API（校验、导出、native 解析）
+- `src/vtsRules.js`：按 VTS 规则实现的 JS 校验逻辑
 - `native/libOpenDRIVE/`：`libOpenDRIVE` 开源库
 - `native/odr_json_parser.cpp`：调用 `libOpenDRIVE` 的解析桥接程序
 
@@ -23,7 +24,7 @@ npm run dev:first
 ```
 
 对应脚本：`scripts/first-run-dev.sh`  
-会自动检查/安装基础依赖、编译 native、同步校验二进制并启动前后端。
+会自动检查/安装基础依赖、编译 native 解析器并启动前后端。
 
 - 日常开发一键启动：
 
@@ -55,11 +56,11 @@ npm run dev:first
 - 检查 `node` / `npm` / `cmake` / 编译工具是否可用（缺失时尝试自动安装）
 - 安装 `node_modules`（缺失时）
 - 强制编译一次 `native/odr_json_parser`
-- 同步 `mapcheck/route_test`（若存在）
 - 启动后端和前端开发服务
 
 说明：
 - `native/odr_json_parser` 是运行导入/解析链路的必要组件，迁移到新电脑通常都需要重新编译。
+- 校验逻辑现在统一使用 `src/vtsRules.js` 中的 JS 实现，不再依赖外部 VTS 二进制。
 - 自动安装目前优先支持：
   - macOS：`brew`
   - Ubuntu/Debian：`apt-get`
@@ -69,7 +70,7 @@ npm run dev:first
 1. 安装依赖
 
 ```bash
-cd /Users/jiang/Desktop/web/opendrive_web_tool
+cd /path/to/opendrive_web_tool
 npm install
 ```
 
@@ -102,51 +103,18 @@ npm run dev
   - macOS：Xcode Command Line Tools
   - Ubuntu：`build-essential`
 
-## 原版 mapcheck + route_test 校验
+## 校验说明
 
-`校验` 接口现在会按顺序调用：
-- 原版 `check_map/mapcheck`
-- 原版 `route_test`（来自 `cpp_route_test.cpp`）
+`校验` 接口现在统一使用 `src/vtsRules.js` 中的规则：
+- 地图结构规则检查
+- 路由连通性规则检查
 
-两者结果会合并后返回到前端弹窗，不再使用 JS 迁移规则。
-当地图来自“导入 XODR”且未编辑时，会直接校验原始 XODR 文本；一旦你编辑道路/属性，会自动切换为校验当前编辑状态生成的 XODR，保证导入与绘制使用同一套校验流程。
+两类结果会合并后返回到前端弹窗。
+当地图来自“导入 XODR”且未编辑时，会直接校验原始 XODR 文本；一旦你编辑道路/属性，会自动切换为校验当前编辑状态生成的 XODR，保证导入与绘制使用同一套规则。
 
-开发启动脚本会自动同步：
-- `../vts_map_interface/build_unix/runtime/VTSMapCheckApp` -> `native/bin/check_map`
-- `../vts_map_interface/build_unix/runtime/VTSMapRouteApp` -> `native/bin/route_test`
-
-如果可执行文件不在默认位置，请设置环境变量：
-
-```bash
-MAPCHECK_BIN=/abs/path/to/check_map npm run dev:server
-MAPROUTE_BIN=/abs/path/to/route_test npm run dev:server
-```
-
-默认会尝试这些位置：
-- `native/bin/check_map`
-- `native/bin/mapcheck`
-- `../vts_map_interface/build_unix/runtime/VTSMapCheckApp`
-- `check_map`（系统 PATH）
-
-以及 route_test：
-- `native/bin/route_test`
-- `../vts_map_interface/build_unix/runtime/VTSMapRouteApp`
-- `route_test`（系统 PATH）
-
-### 无 VTS 部署（JS 校验模式）
-
-现在支持纯 JS 校验，不依赖 `vts_map_interface` 的 `mapcheck/route_test` 二进制。
-
-设置环境变量：
-
-```bash
-VALIDATION_MODE=js npm run dev:server
-```
-
-可选模式：
-- `VALIDATION_MODE=auto`（默认）：优先 native，找不到时自动回退 JS
-- `VALIDATION_MODE=native`：强制 native（缺失即报错）
-- `VALIDATION_MODE=js`：强制 JS（不依赖 VTS）
+说明：
+- 当前不再依赖 `check_map`、`mapcheck`、`route_test` 或 `vts_map_interface` 运行时。
+- 后端固定使用 JS 版 VTS 规则，不需要额外环境变量切换校验模式。
 
 ## 生产构建（可选）
 

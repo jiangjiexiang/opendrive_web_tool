@@ -4,7 +4,7 @@
   "private": true,
   "description": "Web OpenDRIVE editor and validator based on VTS check_map rules",
   "scripts": {
-    "build:native": "cmake -S native -B native/build && cmake --build native/build --target odr_json_parser -j 4",
+    "build:native": "bash ./scripts/build-native.sh",
     "dev": "vite",
     "dev:server": "BACKEND_PORT=5174 node src/server.js",
     "dev:first": "bash ./scripts/first-run-dev.sh",

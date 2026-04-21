@@ -132,9 +132,6 @@ const view = reactive({
   baseOffsetY: 0,
   spaceDown: false
 });
-const renderOptions = reactive({
-  showRoadLabels: true
-});
 
 const GRID_BASE_M = 0.1;
 const GRID_TARGET_PX = 9;
@@ -1167,7 +1164,7 @@ function performRender() {
     visibleRoads.push({ road: r, idx });
     visiblePointCount += Array.isArray(r.points) ? r.points.length : 0;
   });
-  const drawLabels = renderOptions.showRoadLabels && shouldDrawRoadLabels(visibleRoads.length);
+  const drawLabels = roadColorConfig.showRoadLabels && shouldDrawRoadLabels(visibleRoads.length);
   const drawArrows = shouldDrawLaneArrows(visibleRoads.length, visiblePointCount);
   const overviewMode = shouldUseOverviewRoadRendering(visibleRoads.length, visiblePointCount);
   const suppressCenterline = !overviewMode && (view.scale < 1.1 || visibleRoads.length > 220);
@@ -1191,7 +1188,7 @@ function performRender() {
       const labelPoint = renderData?.labelPoint || (Array.isArray(r.points) ? r.points[0] : null);
       if (!labelPoint) return;
       const p = worldToScreen(labelPoint.x, labelPoint.y);
-      ctx.fillStyle = '#111111';
+      ctx.fillStyle = String(roadColorConfig.roadLabelColor || '#111111');
       ctx.font = '12px sans-serif';
       ctx.fillText(`R${r.id}`, p.x + 7, p.y - 6);
     }
@@ -3200,10 +3197,16 @@ function applyNativeRoads(parsedRoads, importedJunctions = [], importedRoadDetai
     road.successorType = detail.successorType || road.successorType;
     road.successorId = String(detail.successorId || road.successorId || '');
     road.successorContactPoint = detail.successorContactPoint || road.successorContactPoint;
+    if (Array.isArray(detail.laneSectionsSpec) && detail.laneSectionsSpec.length) {
+      road.laneSectionsSpec = detail.laneSectionsSpec.map((section) => ({
+        ...section,
+        laneLinks: { ...(section?.laneLinks || {}) }
+      }));
+    }
   });
   roads.value = normalized;
   if (normalized.length > 500) {
-    renderOptions.showRoadLabels = false;
+    roadColorConfig.showRoadLabels = false;
   }
   junctionSpecs.value = Array.isArray(importedJunctions) ? importedJunctions.map((j) => ({ ...j })) : [];
   drawingPoints.value = [];
@@ -3609,7 +3612,6 @@ onBeforeUnmount(() => {
     mouseWorld,
     formatYUp,
     bgGeo,
-    renderOptions,
     roadColorDialog,
     closeRoadColorDialog,
     applyRoadColorDialog,

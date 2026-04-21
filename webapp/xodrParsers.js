@@ -89,7 +89,31 @@ export function parseRoadDetailsFromXodr(source) {
       detail.successorId = succ.getAttribute('elementId') || '';
       detail.successorContactPoint = succ.getAttribute('contactPoint') || detail.successorContactPoint;
     }
+    detail.laneSectionsSpec = Array.from(roadEl.querySelectorAll(':scope > lanes > laneSection')).map((sectionEl) => {
+      const laneLinks = {};
+      const laneEls = Array.from(sectionEl.querySelectorAll(':scope > left > lane, :scope > center > lane, :scope > right > lane'));
+      laneEls.forEach((laneEl) => {
+        const laneId = String(laneEl.getAttribute('id') || '').trim();
+        if (!laneId || laneId === '0') return;
+        const laneLinkEl = laneEl.querySelector(':scope > link');
+        if (!laneLinkEl) return;
+        const predEl = laneLinkEl.querySelector(':scope > predecessor');
+        const succEl = laneLinkEl.querySelector(':scope > successor');
+        if (!predEl && !succEl) return;
+        laneLinks[laneId] = {
+          predecessor: predEl?.getAttribute('id') ?? '',
+          successor: succEl?.getAttribute('id') ?? ''
+        };
+      });
+      return {
+        s: Number(sectionEl.getAttribute('s') || 0),
+        singleSide: String(sectionEl.getAttribute('singleSide') || ''),
+        laneLinks
+      };
+    });
     if (pred != null || succ != null) {
+      details[rid] = detail;
+    } else if (detail.laneSectionsSpec.length) {
       details[rid] = detail;
     }
   });

@@ -19,7 +19,7 @@
         <button type="button" @click="generateAndDownloadXodr">生成并下载XODR</button>
         <button type="button" @click="pickXodrFile">导入XODR</button>
         <button type="button" @click="pickBgFile">上传底图</button>
-        <button type="button" @click="openRoadColorDialog">道路颜色</button>
+        <button type="button" @click="openRoadColorDialog">显示设置</button>
       </div>
       <div class="topbar-status">
         <span class="status-chip">模式: {{ mode }}</span>
@@ -119,10 +119,6 @@
             <input v-model="drawForm.autoJunction" type="checkbox" />
             相交自动生成路口
           </label>
-          <label style="display:flex; align-items:center; gap:8px; padding-top:22px;">
-            <input v-model="renderOptions.showRoadLabels" type="checkbox" />
-            显示道路编号
-          </label>
           <div style="grid-column: 1 / -1;" class="meta">开启后：完成道路时会先做平滑，再尝试在简单十字相交场景自动拆分并生成路口；关闭后只做道路完成，不触发自动路口。</div>
         </div>
       </section>
@@ -218,7 +214,7 @@
     <div v-if="roadColorDialog.visible" class="dialog-mask" @click.self="closeRoadColorDialog">
       <div class="dialog" style="max-width: 420px;">
         <div class="dialog-head">
-          <h3>道路颜色设置</h3>
+          <h3>显示设置</h3>
           <button type="button" class="dialog-close" @click="closeRoadColorDialog">关闭</button>
         </div>
         <div class="grid2" style="margin-top: 8px;">
@@ -231,7 +227,14 @@
           <label style="grid-column: 1 / -1;">Junction区域辅助线颜色
             <input v-model="roadColorDialog.junctionGuideColor" type="color" />
           </label>
-          <div style="grid-column: 1 / -1;" class="meta">应用后：普通道路、junction道路以及 junction 区域辅助线会按对应颜色渲染。</div>
+          <label>道路编号颜色
+            <input v-model="roadColorDialog.roadLabelColor" type="color" />
+          </label>
+          <label style="display:flex; align-items:center; gap:8px; padding-top:22px;">
+            <input v-model="roadColorDialog.showRoadLabels" type="checkbox" />
+            显示道路编号
+          </label>
+          <div style="grid-column: 1 / -1;" class="meta">这里统一控制道路、路口、路口辅助线以及道路编号的显示效果。</div>
           <div class="row" style="grid-column: 1 / -1; margin-top: 6px;">
             <button type="button" @click="applyRoadColorDialog">应用</button>
             <button type="button" @click="resetRoadColorDialogDefaults">恢复默认</button>
@@ -261,7 +264,7 @@
             | warning: <b class="warn-text">{{ validateDialog.warningCount }}</b>
           </p>
           <p class="dialog-status">
-            route_test:
+            route rules:
             <b :class="validateDialog.routeOk ? 'ok-text' : 'err-text'">{{ validateDialog.routeStatus }}</b>
             <template v-if="validateDialog.routeSummary">
               | ok: <b class="ok-text">{{ validateDialog.routeSummary.ok }}</b>
@@ -277,8 +280,8 @@
               <p v-for="(w, i) in validateDialog.warnings" :key="`w-${i}`" class="warn-text">[WARN] {{ w }}</p>
             </template>
             <details style="margin-top: 12px;">
-              <summary>route_test 过程日志</summary>
-              <pre style="white-space: pre-wrap; margin-top: 8px;">{{ validateDialog.routeOutput || '(无 route_test 输出)' }}</pre>
+              <summary>route rules 过程日志</summary>
+              <pre style="white-space: pre-wrap; margin-top: 8px;">{{ validateDialog.routeOutput || '(无 route rules 输出)' }}</pre>
             </details>
             <details style="margin-top: 8px;">
               <summary>mapcheck 过程日志</summary>
@@ -328,8 +331,7 @@ const {
   mouseWorld,
   formatYUp,
   bgGeo,
-  renderOptions,
-  roadColorDialog,
+    roadColorDialog,
   closeRoadColorDialog,
   applyRoadColorDialog,
   resetRoadColorDialogDefaults,
