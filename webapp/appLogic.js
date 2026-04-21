@@ -1,6 +1,7 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { rotateVec } from './editorUtils.js';
 import {
+  parseXodrDoc,
   parseHeaderFromXodr,
   parseRoadDetailsFromXodr,
   parseJunctionSpecsFromXodr,
@@ -153,8 +154,39 @@ let renderFrame = 0;
 const roadListScrollTop = ref(0);
 const roadListViewportHeight = ref(320);
 const collapsedRoadGroups = ref({});
+const roadSearchQuery = ref('');
 
 const selectedRoad = computed(() => roads.value[selectedRoadIndex.value] || null);
+const selectedRoadCode = computed(() => {
+  const road = selectedRoad.value;
+  if (!road) return '';
+  const roadId = String(road.id ?? '').trim();
+  const importedRaw = String(rawRoadXmlById.value?.[roadId] || '').trim();
+  if (importedRaw) return importedRaw;
+  return JSON.stringify({
+    id: road.id,
+    junction: road.junction,
+    predecessorType: road.predecessorType,
+    predecessorId: road.predecessorId,
+    successorType: road.successorType,
+    successorId: road.successorId,
+    leftLaneCount: road.leftLaneCount,
+    rightLaneCount: road.rightLaneCount,
+    leftLaneWidth: road.leftLaneWidth,
+    rightLaneWidth: road.rightLaneWidth,
+    centerType: road.centerType,
+    length: road.length,
+    points: Array.isArray(road.points)
+      ? road.points.map((p) => ({
+        x: Number(p.x),
+        y: Number(p.y),
+        s: Number.isFinite(Number(p.s)) ? Number(p.s) : undefined,
+        hdg: Number.isFinite(Number(p.hdg)) ? Number(p.hdg) : undefined
+      }))
+      : [],
+    geometry: Array.isArray(road.geometry) ? road.geometry : []
+  }, null, 2);
+});
 const useVirtualRoadList = computed(() => roads.value.length >= 500);
 const roadListWindowCount = computed(() => {
   const base = Math.ceil(Math.max(120, roadListViewportHeight.value) / ROAD_LIST_ROW_HEIGHT);
@@ -216,6 +248,22 @@ const roadTreeRows = computed(() => {
     .map((road, index) => ({ road, index }))
     .filter(({ road }) => !childRoadIds.value.has(String(road?.id ?? '')));
   return rows.length ? rows : roads.value.map((road, index) => ({ road, index }));
+});
+const normalizedRoadSearchQuery = computed(() => String(roadSearchQuery.value || '').trim().toLowerCase());
+const filteredVirtualRoadRows = computed(() => {
+  const query = normalizedRoadSearchQuery.value;
+  if (!query) return virtualRoadRows.value;
+  return virtualRoadRows.value.filter((row) => String(row?.road?.id ?? '').toLowerCase().includes(query));
+});
+const filteredRoadTreeRows = computed(() => {
+  const query = normalizedRoadSearchQuery.value;
+  if (!query) return roadTreeRows.value;
+  return roadTreeRows.value.filter((row) => {
+    const roadId = String(row?.road?.id ?? '').toLowerCase();
+    const children = getChildRoadEntries(String(row?.road?.id ?? ''));
+    return roadId.includes(query)
+      || children.some((child) => String(child?.road?.id ?? '').toLowerCase().includes(query));
+  });
 });
 
 watch(selectedRoad, (road) => {
@@ -519,6 +567,11 @@ function projectPointToSeg(p, a, b) {
 function projectPointToRoadST(p, road) {
   const pts = Array.isArray(road?.points) ? road.points : [];
   if (pts.length < 2) return null;
+  const leftLaneCount = Math.max(0, Number(road?.leftLaneCount || 0));
+  const rightLaneCount = Math.max(0, Number(road?.rightLaneCount || 0));
+  const leftLaneWidth = Math.max(0.5, Number(road?.leftLaneWidth || road?.laneWidth || 3.5));
+  const rightLaneWidth = Math.max(0.5, Number(road?.rightLaneWidth || road?.laneWidth || 3.5));
+  const halfWidth = Math.max(1.8, leftLaneCount * leftLaneWidth * 0.5 + rightLaneCount * rightLaneWidth * 0.5);
   let best = null;
   let accS = 0;
   for (let i = 1; i < pts.length; i += 1) {
@@ -531,7 +584,8 @@ function projectPointToRoadST(p, road) {
       roadId: String(road.id ?? ''),
       s: accS + projected.ratio * segLen,
       t: projected.signedOffset,
-      distance: projected.distance
+      distance: projected.distance,
+      halfWidth
     };
     if (!best || candidate.distance < best.distance) {
       best = candidate;
@@ -542,7 +596,7 @@ function projectPointToRoadST(p, road) {
 }
 
 function updateHoverRoadCoord(worldPoint) {
-  const maxDistance = Math.max(2.5, 24 / Math.max(0.1, view.scale));
+  const screenTolerance = 24 / Math.max(0.1, view.scale);
   let best = null;
   roads.value.forEach((road) => {
     if (road?.visible === false) return;
@@ -550,7 +604,9 @@ function updateHoverRoadCoord(worldPoint) {
     if (!projected) return;
     if (!best || projected.distance < best.distance) best = projected;
   });
-  if (!best || best.distance > maxDistance) {
+  const maxDistance = best ? Math.max(screenTolerance, Number(best.halfWidth || 0) + 1.5) : screenTolerance;
+  const tWithinRoad = best ? Math.abs(Number(best.t || 0)) <= Number(best.halfWidth || 0) + 0.1 : false;
+  if (!best || best.distance > maxDistance || !tWithinRoad) {
     hoverRoadCoord.roadId = '';
     hoverRoadCoord.s = null;
     hoverRoadCoord.t = null;
@@ -1434,6 +1490,29 @@ function fitView() {
   render();
 }
 
+function centerViewOnRoad(index) {
+  const road = roads.value[index];
+  if (!road || !canvasEl.value) return;
+  const points = Array.isArray(road.points) ? road.points : [];
+  if (!points.length) return;
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  points.forEach((p) => {
+    minX = Math.min(minX, Number(p.x));
+    minY = Math.min(minY, Number(p.y));
+    maxX = Math.max(maxX, Number(p.x));
+    maxY = Math.max(maxY, Number(p.y));
+  });
+  if (!Number.isFinite(minX) || !Number.isFinite(minY) || !Number.isFinite(maxX) || !Number.isFinite(maxY)) return;
+  const centerX = (minX + maxX) * 0.5;
+  const centerY = (minY + maxY) * 0.5;
+  view.offsetX = canvasEl.value.width * 0.5 - centerX * view.scale;
+  view.offsetY = canvasEl.value.height * 0.5 + centerY * view.scale;
+  render();
+}
+
 function nextRoadId() {
   let maxId = 0;
   roads.value.forEach((r) => {
@@ -1723,15 +1802,22 @@ function resolveApproachLaneProfile(approach, preferredRole) {
   const incomingWidth = Math.max(0.5, Number(approach?.incomingWidth || 3.5));
   const outgoingWidth = Math.max(0.5, Number(approach?.outgoingWidth || 3.5));
 
+  // Junction internal connectors are forced to single-lane.
   if (preferredRole === 'incoming') {
-    if (incomingCount > 0) return { roleUsed: 'incoming', count: incomingCount, width: incomingWidth, fallbackUsed: false };
-    if (outgoingCount > 0) return { roleUsed: 'outgoing', count: outgoingCount, width: outgoingWidth, fallbackUsed: true };
-    return { roleUsed: 'incoming', count: 1, width: incomingWidth, fallbackUsed: true };
+    return {
+      roleUsed: incomingCount > 0 ? 'incoming' : (outgoingCount > 0 ? 'outgoing' : 'incoming'),
+      count: 1,
+      width: incomingCount > 0 ? incomingWidth : (outgoingCount > 0 ? outgoingWidth : incomingWidth),
+      fallbackUsed: incomingCount <= 0
+    };
   }
+  return {
+    roleUsed: outgoingCount > 0 ? 'outgoing' : (incomingCount > 0 ? 'incoming' : 'outgoing'),
+    count: 1,
+    width: outgoingCount > 0 ? outgoingWidth : (incomingCount > 0 ? incomingWidth : outgoingWidth),
+    fallbackUsed: outgoingCount <= 0
+  };
 
-  if (outgoingCount > 0) return { roleUsed: 'outgoing', count: outgoingCount, width: outgoingWidth, fallbackUsed: false };
-  if (incomingCount > 0) return { roleUsed: 'incoming', count: incomingCount, width: incomingWidth, fallbackUsed: true };
-  return { roleUsed: 'outgoing', count: 1, width: outgoingWidth, fallbackUsed: true };
 }
 
 function buildLaneSectionLinkSpecs(fromApproach, fromProfile, toApproach, toProfile, useLeftLanes) {
@@ -1888,13 +1974,11 @@ function buildConnectorCenterline(fromApproach, toApproach, smoothness) {
   if (ratio <= 2.1) {
     return {
       points: primary,
-      // Keep endpoints exactly snapped to approach boundaries.
-      // Using the guarded Bezier segment directly may extend p0/p3 slightly.
       bezierSegments: []
     };
   }
   return {
-    points: [{ x: p0.x, y: p0.y }, { x: p3.x, y: p3.y }],
+    points: [],
     bezierSegments: []
   };
 }
@@ -2051,9 +2135,9 @@ function buildSasGeometryBetweenPoses(startPose, endPose, options = {}) {
     }
   };
 
-  for (let r = 0.2; r <= 0.8 + 1e-6; r += 0.1) {
-    for (let scale = 0.8; scale <= 2.8 + 1e-6; scale += 0.15) {
-      for (let q = 0.6; q <= 1.8 + 1e-6; q += 0.2) {
+  for (let r = 0.08; r <= 0.92 + 1e-6; r += 0.06) {
+    for (let scale = 0.45; scale <= 6.0 + 1e-6; scale += 0.2) {
+      for (let q = 0.25; q <= 4.0 + 1e-6; q += 0.25) {
         evalCandidate(r, chord * scale, q);
       }
     }
@@ -2083,8 +2167,6 @@ function buildSasGeometryBetweenPoses(startPose, endPose, options = {}) {
       stepQ *= 0.66;
     }
   }
-
-  if (!best) return null;
 
   const { ls0, ls1, la, curvature, poses } = best;
   const geometry = [
@@ -2469,7 +2551,6 @@ function generateJunctionFromHandles(handles) {
   const meshId = nextJunctionId();
 
   refined.forEach((a) => {
-    a.road.junctionRefId = String(meshId);
     if (a.handle.endpoint === 'end') {
       a.road.successorType = 'junction';
       a.road.successorId = String(meshId);
@@ -2495,12 +2576,9 @@ function generateJunctionFromHandles(handles) {
       if (to === from) continue;
       let centerline = buildConnectorCenterline(from, to, junctionForm.smoothness);
       if (!Array.isArray(centerline?.points) || centerline.points.length < 2) {
-        centerline = {
-          points: [
-          { x: Number(from.boundary?.x ?? from.pose?.x ?? 0), y: Number(from.boundary?.y ?? from.pose?.y ?? 0) },
-          { x: Number(to.boundary?.x ?? to.pose?.x ?? 0), y: Number(to.boundary?.y ?? to.pose?.y ?? 0) }
-          ],
-          bezierSegments: []
+        return {
+          ok: false,
+          reason: `自动路口生成失败：道路 ${from.road.id} 到 ${to.road.id} 无法生成有效中心线，当前场景过于复杂。`
         };
       }
       const fromProfile = resolveApproachLaneProfile(from, 'incoming');
@@ -2515,24 +2593,11 @@ function generateJunctionFromHandles(handles) {
     }
   }
 
-  const pairBuckets = new Map();
-  directedFlows.forEach((flow) => {
-    const key = [String(flow.from.road.id), String(flow.to.road.id)].sort().join('::');
-    const list = pairBuckets.get(key) || [];
-    list.push(flow);
-    pairBuckets.set(key, list);
-  });
-  const expectedConnectorCount = pairBuckets.size;
+  const expectedConnectorCount = directedFlows.length;
 
-  for (const flows of pairBuckets.values()) {
-    if (!flows.length) continue;
-    let primary = flows[0];
-    let reverse = flows.length > 1 ? flows[1] : null;
-    if (reverse && String(primary.from.road.id) > String(reverse.from.road.id)) {
-      const tmp = primary;
-      primary = reverse;
-      reverse = tmp;
-    }
+  for (const primary of directedFlows) {
+    if (!primary) continue;
+    const reverse = null;
 
     const primarySideLeft = approachRoleIsLeft(primary.from, primary.fromProfile.roleUsed);
     const buildSideSpec = (flow, sideLeft) => {
@@ -2587,7 +2652,12 @@ function generateJunctionFromHandles(handles) {
       },
       getConnectorSasTune(primary.from.road.id, primary.from.handle.endpoint, primary.to.road.id, primary.to.handle.endpoint)
     );
-    if (!sasApplied) sasFallbackCount += 1;
+    if (!sasApplied) {
+      return {
+        ok: false,
+        reason: `自动路口生成失败：道路 ${primary.from.road.id} 到 ${primary.to.road.id} 无法生成 spiral-arc-spiral，请调整道路位置、方向或减少复杂度后重试。`
+      };
+    }
     connectorRoad.junction = String(meshId);
     const leftStartCount = leftSpec ? leftSpec.links.fromCount : 0;
     const rightStartCount = rightSpec ? rightSpec.links.fromCount : 0;
@@ -2635,7 +2705,7 @@ function generateJunctionFromHandles(handles) {
     connectorRoad.successorContactPoint = primary.to.handle.endpoint;
     connectorRoad.connectorMeta = {
       kind: 'junction_internal',
-      bidirectional: Boolean(reverse),
+      bidirectional: false,
       fromRoadId: String(primary.from.road.id),
       toRoadId: String(primary.to.road.id),
       fromEndpoint: primary.from.handle.endpoint,
@@ -2747,7 +2817,7 @@ function generateJunctionFromHandles(handles) {
     ok: true,
     generatedCount: generatedRoadIds.length,
     expectedCount: expectedConnectorCount,
-    sasFallbackCount
+    sasFallbackCount: 0
   };
 }
 
@@ -3102,8 +3172,9 @@ function setMode(next) {
   render();
 }
 
-function selectRoad(i) {
+function selectRoad(i, options = {}) {
   selectedRoadIndex.value = i;
+  if (options.center) centerViewOnRoad(i);
   render();
 }
 
@@ -3315,14 +3386,121 @@ function applySelectedRoad() {
   render();
 }
 
+function applySelectedRoadCode(codeText) {
+  const road = selectedRoad.value;
+  if (!road) throw new Error('请先选择道路');
+  const source = String(codeText || '').trim();
+  if (!source) throw new Error('代码内容不能为空');
+
+  const currentId = String(road.id ?? '').trim();
+  if (!currentId) throw new Error('当前道路缺少 id');
+
+  if (source.startsWith('<road')) {
+    const wrapped = `<OpenDRIVE>${source}</OpenDRIVE>`;
+    const { doc } = parseXodrDoc(wrapped);
+    const roadEl = doc.querySelector('OpenDRIVE > road');
+    if (!roadEl) throw new Error('XML 中缺少 <road> 节点');
+    const xmlRoadId = String(roadEl.getAttribute('id') || '').trim();
+    if (xmlRoadId && xmlRoadId !== currentId) {
+      throw new Error(`XML 中的 road id (${xmlRoadId}) 必须与当前道路 id (${currentId}) 一致`);
+    }
+
+    rawRoadXmlById.value = {
+      ...(rawRoadXmlById.value || {}),
+      [currentId]: source
+    };
+    const nextDirty = { ...(dirtyRoadIds.value || {}) };
+    delete nextDirty[currentId];
+    dirtyRoadIds.value = nextDirty;
+
+    const roadDetails = parseRoadDetailsFromXodr(wrapped).details?.[currentId];
+    if (roadDetails) {
+      road.predecessorType = roadDetails.predecessorType || road.predecessorType;
+      road.predecessorId = String(roadDetails.predecessorId || road.predecessorId || '');
+      road.predecessorContactPoint = roadDetails.predecessorContactPoint || road.predecessorContactPoint;
+      road.successorType = roadDetails.successorType || road.successorType;
+      road.successorId = String(roadDetails.successorId || road.successorId || '');
+      road.successorContactPoint = roadDetails.successorContactPoint || road.successorContactPoint;
+      if (Array.isArray(roadDetails.laneSectionsSpec) && roadDetails.laneSectionsSpec.length) {
+        road.laneSectionsSpec = roadDetails.laneSectionsSpec.map((section) => ({
+          ...section,
+          laneLinks: { ...(section?.laneLinks || {}) }
+        }));
+      }
+    }
+    if (roadEl.hasAttribute('junction')) {
+      road.junction = String(roadEl.getAttribute('junction') || road.junction || '-1');
+    }
+    render();
+    return;
+  }
+
+  let payload = null;
+  try {
+    payload = JSON.parse(source);
+  } catch {
+    throw new Error('请输入有效的 JSON 或 <road> XML');
+  }
+
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw new Error('JSON 必须是对象');
+  }
+  if (payload.id !== undefined && String(payload.id) !== currentId) {
+    throw new Error(`JSON 中的 id (${payload.id}) 必须与当前道路 id (${currentId}) 一致`);
+  }
+
+  if (payload.junction !== undefined) road.junction = String(payload.junction);
+  if (payload.predecessorType !== undefined) road.predecessorType = String(payload.predecessorType || 'road');
+  if (payload.predecessorId !== undefined) road.predecessorId = String(payload.predecessorId || '');
+  if (payload.successorType !== undefined) road.successorType = String(payload.successorType || 'road');
+  if (payload.successorId !== undefined) road.successorId = String(payload.successorId || '');
+  if (payload.leftLaneCount !== undefined) road.leftLaneCount = Math.max(0, Number(payload.leftLaneCount || 0));
+  if (payload.rightLaneCount !== undefined) road.rightLaneCount = Math.max(0, Number(payload.rightLaneCount || 0));
+  if (payload.leftLaneWidth !== undefined) road.leftLaneWidth = Math.max(0.5, Number(payload.leftLaneWidth || road.leftLaneWidth || 3.5));
+  if (payload.rightLaneWidth !== undefined) road.rightLaneWidth = Math.max(0.5, Number(payload.rightLaneWidth || road.rightLaneWidth || 3.5));
+  if (payload.centerType !== undefined) road.centerType = String(payload.centerType || 'none');
+  road.laneWidth = (Number(road.leftLaneWidth || 3.5) + Number(road.rightLaneWidth || 3.5)) / 2;
+
+  if (Array.isArray(payload.points) && payload.points.length >= 2) {
+    road.editPoints = payload.points.map((p) => ({ x: Number(p.x), y: Number(p.y) }));
+    applyRoadShape(road, getRoadEditPoints(road), { smoothing: drawForm.smoothing });
+  }
+  if (Array.isArray(payload.geometry) && payload.geometry.length) {
+    road.geometry = payload.geometry.map((g) => ({ ...g }));
+    if (payload.length !== undefined) road.length = Number(payload.length || road.length || 0);
+  }
+  if (Array.isArray(payload.laneSectionsSpec)) {
+    road.laneSectionsSpec = payload.laneSectionsSpec.map((section) => ({
+      ...section,
+      laneLinks: { ...(section?.laneLinks || {}) }
+    }));
+  }
+
+  const nextDirty = { ...(dirtyRoadIds.value || {}) };
+  nextDirty[currentId] = true;
+  dirtyRoadIds.value = nextDirty;
+  render();
+}
+
 function currentSpec() {
+  const bounds = roads.value.reduce((acc, road) => {
+    (Array.isArray(road?.points) ? road.points : []).forEach((point) => {
+      const x = Number(point?.x);
+      const y = Number(point?.y);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+      acc.minX = Math.min(acc.minX, x);
+      acc.maxX = Math.max(acc.maxX, x);
+      acc.minY = Math.min(acc.minY, y);
+      acc.maxY = Math.max(acc.maxY, y);
+    });
+    return acc;
+  }, { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity });
+  const hasBounds = Number.isFinite(bounds.minX) && Number.isFinite(bounds.maxX) && Number.isFinite(bounds.minY) && Number.isFinite(bounds.maxY);
   const roadsForExport = roads.value.map((r) => {
-    const rid = String(r.id);
-    const rawRoadXml = dirtyRoadIds.value[rid] ? '' : (rawRoadXmlById.value[rid] || '');
     return {
       ...r,
       length: polylineLength(r.points),
-      rawRoadXml
+      rawRoadXml: ''
     };
   });
   const junctions = junctionsForExport();
@@ -3330,10 +3508,10 @@ function currentSpec() {
     header: {
       name: headerForm.name,
       vendor: headerForm.vendor,
-      north: Number(headerForm.north),
-      south: Number(headerForm.south),
-      east: Number(headerForm.east),
-      west: Number(headerForm.west),
+      north: hasBounds ? Number(bounds.maxY) : Number(headerForm.north),
+      south: hasBounds ? Number(bounds.minY) : Number(headerForm.south),
+      east: hasBounds ? Number(bounds.maxX) : Number(headerForm.east),
+      west: hasBounds ? Number(bounds.minX) : Number(headerForm.west),
       rawHeaderXml: headerDirty.value ? undefined : (importedHeaderXml.value || undefined)
     },
     roads: roadsForExport,
@@ -3652,7 +3830,7 @@ function handleWheel(e) {
   const mx = e.clientX - rect.left;
   const my = e.clientY - rect.top;
   const before = screenToWorld(mx, my);
-  view.scale = Math.max(0.1, Math.min(20, view.scale * (e.deltaY < 0 ? 1.1 : 0.9)));
+  view.scale = Math.max(0.1, Math.min(300, view.scale * (e.deltaY < 0 ? 1.1 : 0.9)));
   const after = worldToScreen(before.x, before.y);
   view.offsetX += mx - after.x;
   view.offsetY += my - after.y;
@@ -3747,6 +3925,15 @@ function isEditableElement(target) {
 }
 
 function handleKeyDown(e) {
+  if (!isEditableElement(e.target) && e.key === 'Escape') {
+    if (mode.value === 'draw' && drawingPoints.value.length > 0) {
+      e.preventDefault();
+      drawingPoints.value = [];
+      mode.value = 'select';
+      render();
+      return;
+    }
+  }
   if (!isEditableElement(e.target) && e.key === 'Enter') {
     if (mode.value === 'draw' && drawingPoints.value.length >= 2) {
       e.preventDefault();
@@ -3861,6 +4048,9 @@ onBeforeUnmount(() => {
     isRoadVisible,
     toggleRoadVisibility,
     roadTreeRows,
+    roadSearchQuery,
+    filteredVirtualRoadRows,
+    filteredRoadTreeRows,
     selectRoad,
     roadListEl,
     handleRoadListScroll,
@@ -3891,6 +4081,7 @@ onBeforeUnmount(() => {
     getConnectHandleText,
     clearConnectDraft,
     selectedRoad,
+    selectedRoadCode,
     rebuildSelectedConnector,
     junctionForm,
     junctionUi,
@@ -3900,6 +4091,7 @@ onBeforeUnmount(() => {
     clearJunctionDraft,
     roadForm,
     applySelectedRoad,
+    applySelectedRoadCode,
     validateDialog
   };
 }

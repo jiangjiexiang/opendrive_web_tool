@@ -388,6 +388,14 @@ button:disabled,
   flex-direction: column;
 }
 
+.road-search-wrap {
+  margin-bottom: 10px;
+}
+
+.road-search-input {
+  width: 100%;
+}
+
 .road-list-fill {
   flex: 1;
   min-height: 0;
@@ -780,6 +788,71 @@ code {
   font-size: 12px;
   line-height: 1.45;
   color: var(--text-soft);
+}
+
+.road-code-editor {
+  width: 100%;
+  min-height: 420px;
+  resize: vertical;
+  border: 0;
+  background: transparent;
+  color: var(--text-soft);
+  font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  outline: none;
+}
+
+.settings-grid {
+  align-items: start;
+  gap: 10px;
+}
+
+.color-setting {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(12, 20, 19, 0.86);
+}
+
+.color-setting input[type="color"] {
+  width: 100%;
+  min-height: 38px;
+  padding: 2px;
+  border-radius: 10px;
+  background: rgba(8, 15, 14, 0.9);
+  cursor: pointer;
+}
+
+.color-setting-wide {
+  grid-column: 1 / -1;
+}
+
+.toggle-setting {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 58px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(12, 20, 19, 0.86);
+}
+
+.toggle-setting input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+}
+
+.settings-note {
+  grid-column: 1 / -1;
+  margin-top: 0;
+  padding: 2px 2px 0;
+}
+
+.settings-actions {
+  grid-column: 1 / -1;
+  margin-top: 0;
 }
 
 .ok-text {

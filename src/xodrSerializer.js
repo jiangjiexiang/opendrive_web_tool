@@ -239,12 +239,15 @@ function laneSectionXml(section, road, roadIndex) {
 }
 
 function lanesBlockXml(road, roadIndex) {
+  const fallbackLeftLaneCount = Number(road.leftLaneCount || 0);
+  const fallbackRightLaneCount = Number(road.rightLaneCount || 0);
+  const useSingleLaneFallback = fallbackLeftLaneCount <= 0 && fallbackRightLaneCount <= 0;
   const sections = Array.isArray(road.laneSectionsSpec) && road.laneSectionsSpec.length
     ? road.laneSectionsSpec
     : [{
       s: 0,
-      leftLaneCount: road.leftLaneCount,
-      rightLaneCount: road.rightLaneCount,
+      leftLaneCount: useSingleLaneFallback ? 0 : fallbackLeftLaneCount,
+      rightLaneCount: useSingleLaneFallback ? 1 : fallbackRightLaneCount,
       leftLaneWidth: road.leftLaneWidth,
       rightLaneWidth: road.rightLaneWidth,
       centerType: road.centerType || 'none',
@@ -254,6 +257,12 @@ function lanesBlockXml(road, roadIndex) {
   const normalizedSections = [...sections]
     .map((section) => ({
       ...section,
+      leftLaneCount: Number(section.leftLaneCount || 0) <= 0 && Number(section.rightLaneCount || 0) <= 0
+        ? 0
+        : Number(section.leftLaneCount || 0),
+      rightLaneCount: Number(section.leftLaneCount || 0) <= 0 && Number(section.rightLaneCount || 0) <= 0
+        ? 1
+        : Number(section.rightLaneCount || 0),
       s: Number(section.s || 0)
     }))
     .sort((a, b) => a.s - b.s);
@@ -361,16 +370,18 @@ function roadXml(rawRoad, roadIndex) {
   const rid = String(road.id);
   const junction = String(road.junction ?? '-1');
   const length = Number(road.length || 1);
-  const predecessorId = road.predecessorId === undefined || road.predecessorId === null
+  let predecessorId = road.predecessorId === undefined || road.predecessorId === null
     ? ''
     : String(road.predecessorId).trim();
-  const successorId = road.successorId === undefined || road.successorId === null
+  let successorId = road.successorId === undefined || road.successorId === null
     ? ''
     : String(road.successorId).trim();
   const predecessorType = String(road.predecessorType || 'road');
   const successorType = String(road.successorType || 'road');
   const predecessorContactPoint = String(road.predecessorContactPoint || 'end');
   const successorContactPoint = String(road.successorContactPoint || 'start');
+  if (predecessorType === 'road' && predecessorId === rid) predecessorId = '';
+  if (successorType === 'road' && successorId === rid) successorId = '';
   const linkLines = [];
   if (predecessorId || successorId) {
     linkLines.push('    <link>');
@@ -435,12 +446,30 @@ function buildXodr(spec) {
   const junctions = Array.isArray(spec.junctions) ? spec.junctions : [];
   const rawOpenDriveExtras = Array.isArray(spec.rawOpenDriveExtras) ? spec.rawOpenDriveExtras : [];
   const roadIndex = new Map(roads.map((road) => [String(road.id), road]));
+  const bounds = roads.reduce((acc, road) => {
+    const points = Array.isArray(road?.points) ? road.points : [];
+    points.forEach((point) => {
+      const x = Number(point?.x);
+      const y = Number(point?.y);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+      acc.minX = Math.min(acc.minX, x);
+      acc.maxX = Math.max(acc.maxX, x);
+      acc.minY = Math.min(acc.minY, y);
+      acc.maxY = Math.max(acc.maxY, y);
+    });
+    return acc;
+  }, { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity });
+  const hasBounds = Number.isFinite(bounds.minX) && Number.isFinite(bounds.maxX) && Number.isFinite(bounds.minY) && Number.isFinite(bounds.maxY);
+  const north = hasBounds ? bounds.maxY : Number(header.north || 0);
+  const south = hasBounds ? bounds.minY : Number(header.south || 0);
+  const east = hasBounds ? bounds.maxX : Number(header.east || 0);
+  const west = hasBounds ? bounds.minX : Number(header.west || 0);
 
   const headerXml = [
-    `  <header revMajor="1" revMinor="4" name="${esc(header.name || '')}" version="1" date="${esc(header.date || new Date().toISOString())}" north="${Number(header.north || 0)}" south="${Number(header.south || 0)}" east="${Number(header.east || 0)}" west="${Number(header.west || 0)}" >`,
+    `  <header revMajor="1" revMinor="4" name="${esc(header.name || 'web_editor_map')}" version="1" date="${esc(header.date || new Date().toISOString())}" north="${north}" south="${south}" east="${east}" west="${west}" >`,
     '    <geoReference><![CDATA[]]></geoReference>',
     '    <userData>',
-    '      <vectorScene program="web_editor_map"/>',
+      '      <vectorScene program="web_editor_map"/>',
     '    </userData>',
     '  </header>'
   ].join('\n');

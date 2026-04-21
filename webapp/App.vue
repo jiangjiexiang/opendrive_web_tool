@@ -13,9 +13,9 @@
           <div class="toolbar-group">
             <button type="button" class="mode-btn" :class="{ active: mode === 'draw' }" @click="setMode('draw')">绘制</button>
             <button type="button" class="mode-btn" :class="{ active: mode === 'select' }" @click="setMode('select')">选择</button>
-            <button type="button" class="mode-btn" :class="{ active: mode === 'connect' }" @click="setMode('connect')">连接</button>
+            <button type="button" class="mode-btn" :class="{ active: mode === 'connect' }" @click="setMode('connect')">生成弯道</button>
             <button type="button" class="mode-btn" :class="{ active: mode === 'extend' }" @click="setMode('extend')">延伸</button>
-            <button type="button" class="mode-btn" :class="{ active: mode === 'junction' }" @click="setMode('junction')">路口</button>
+            <button type="button" class="mode-btn" :class="{ active: mode === 'junction' }" @click="setMode('junction')">自动生成junction</button>
           </div>
         </section>
         <section class="tool-cluster">
@@ -34,6 +34,7 @@
             <button type="button" @click="generateAndDownloadXodr">生成并下载XODR</button>
             <button type="button" @click="pickXodrFile">导入XODR</button>
             <button type="button" @click="pickBgFile">上传底图</button>
+            <button type="button" :disabled="!selectedRoad" @click="roadCodeDialogVisible = true">查看道路代码</button>
             <button type="button" @click="openRoadColorDialog">显示设置</button>
           </div>
         </section>
@@ -64,18 +65,21 @@
           <h2>Roads</h2>
           <span class="panel-badge">{{ roads.length }}</span>
         </div>
+        <div class="road-search-wrap">
+          <input v-model="roadSearchQuery" type="search" placeholder="搜索 road id" class="road-search-input" />
+        </div>
         <div ref="roadListEl" class="road-list road-list-fill" @scroll="handleRoadListScroll">
           <template v-if="useVirtualRoadList">
             <div class="road-list-spacer" :style="{ height: `${roadListTopPadding}px` }"></div>
             <div
-              v-for="row in virtualRoadRows"
+              v-for="row in filteredVirtualRoadRows"
               :key="`vroad-${row.road?.id}-${row.index}`"
               class="road-item road-item-compact"
               :class="{ selected: row.index === selectedRoadIndex, muted: !isRoadVisible(row.road) }"
             >
               <div class="road-item-main">
-                <button type="button" class="road-item-select" @click="selectRoad(row.index)">
-                  <div>Road {{ row.road.id }} | len={{ formatNum(row.road.length, 2) }} | pts={{ row.road.points.length }}</div>
+                <button type="button" class="road-item-select" @click="selectRoad(row.index, { center: true })">
+                  <div>Road {{ row.road.id }} | len={{ formatNum(row.road.length, 2) }}</div>
                   <div class="meta">pred={{ row.road.predecessorId || '-' }} | succ={{ row.road.successorId || '-' }}</div>
                 </button>
                 <button type="button" class="road-ctrl-btn" @click.stop="toggleRoadVisibility(row.index)">
@@ -87,13 +91,13 @@
             <div class="meta road-list-hint">大地图模式：已启用虚拟列表，仅渲染可见道路项。</div>
           </template>
           <template v-else>
-            <div v-for="row in roadTreeRows" :key="`${row.road.id}-${row.index}`" class="road-tree-item">
+            <div v-for="row in filteredRoadTreeRows" :key="`${row.road.id}-${row.index}`" class="road-tree-item">
               <div
                 class="road-item"
                 :class="{ selected: row.index === selectedRoadIndex, muted: !isRoadVisible(row.road) }"
               >
-                <button type="button" class="road-item-select" @click="selectRoad(row.index)">
-                  <div>Road {{ row.road.id }} | len={{ formatNum(row.road.length, 2) }} | pts={{ row.road.points.length }}</div>
+                <button type="button" class="road-item-select" @click="selectRoad(row.index, { center: true })">
+                  <div>Road {{ row.road.id }} | len={{ formatNum(row.road.length, 2) }}</div>
                   <div class="meta">pred={{ row.road.predecessorId || '-' }} | succ={{ row.road.successorId || '-' }}</div>
                 </button>
                 <div class="road-item-actions">
@@ -120,8 +124,8 @@
                   class="child-road-item"
                   :class="{ selected: child.index === selectedRoadIndex, muted: !isRoadVisible(child.road) }"
                 >
-                  <button type="button" class="road-item-select" @click="selectRoad(child.index)">
-                    <div>Road {{ child.road.id }} | len={{ formatNum(child.road.length, 2) }} | pts={{ child.road.points.length }}</div>
+                  <button type="button" class="road-item-select" @click="selectRoad(child.index, { center: true })">
+                    <div>Road {{ child.road.id }} | len={{ formatNum(child.road.length, 2) }}</div>
                   </button>
                   <button type="button" class="road-ctrl-btn" @click.stop="toggleRoadVisibility(child.index)">
                     {{ isRoadVisible(child.road) ? '显示' : '隐藏' }}
@@ -176,69 +180,6 @@
       </section>
 
       <section class="panel">
-        <h2>绘制优化</h2>
-        <div class="grid2">
-          <label style="grid-column: 1 / -1;">道路平滑度
-            <input v-model.number="drawForm.smoothing" type="range" min="0.1" max="0.95" step="0.01" />
-          </label>
-          <label>数值<input v-model.number="drawForm.smoothing" type="number" min="0.1" max="0.95" step="0.01" /></label>
-          <label style="display:flex; align-items:center; gap:8px; padding-top:22px;">
-            <input v-model="drawForm.autoJunction" type="checkbox" />
-            相交自动生成路口
-          </label>
-          <div style="grid-column: 1 / -1;" class="meta">开启后：完成道路时会先做平滑，再尝试在简单十字相交场景自动拆分并生成路口；关闭后只做道路完成，不触发自动路口。</div>
-        </div>
-      </section>
-
-      <section class="panel">
-        <h2>弯道连接</h2>
-        <div class="grid2">
-          <label style="grid-column: 1 / -1;">贴合强度(越大弯道越“鼓”)
-            <input v-model.number="connectForm.smoothness" type="range" min="0.1" max="0.8" step="0.01" />
-          </label>
-          <label>数值<input v-model.number="connectForm.smoothness" type="number" min="0.1" max="0.8" step="0.01" /></label>
-          <label>端点重叠(m)<input v-model.number="connectForm.overlap" type="number" min="0" max="6" step="0.1" /></label>
-          <div class="meta">连接模式下点击两个端点小球自动生成弯道</div>
-          <div style="grid-column: 1 / -1;" class="meta">第一点: {{ getConnectHandleText(connectDraft.first) }}</div>
-          <div style="grid-column: 1 / -1;" class="meta">第二点: {{ getConnectHandleText(connectDraft.second) }}</div>
-          <div class="row" style="grid-column: 1 / -1; margin-top: 4px;">
-            <button type="button" @click="clearConnectDraft">清空端点选择</button>
-            <button type="button" :disabled="!selectedRoad?.connectorMeta" @click="rebuildSelectedConnector">重建选中弯道</button>
-          </div>
-        </div>
-      </section>
-
-      <section v-if="mode === 'junction'" class="panel">
-        <h2>自动路口生成</h2>
-        <div class="grid2">
-          <label>边缘留白(m)
-            <input v-model.number="junctionForm.edgePadding" type="number" min="1" step="0.5" />
-          </label>
-          <label>内部平滑度
-            <input v-model.number="junctionForm.smoothness" type="number" min="0.1" max="0.9" step="0.01" />
-          </label>
-          <label style="grid-column: 1 / -1;">车道过渡长度(m)
-            <input v-model.number="junctionForm.transitionLength" type="number" min="3" step="1" />
-          </label>
-          <div style="grid-column: 1 / -1;" class="meta">路口模式下，依次点击 3~4 条彼此分离道路的端点，小球选择逻辑与弯道模式一致。</div>
-          <div style="grid-column: 1 / -1;" class="meta">点1: {{ getConnectHandleText(junctionDraft.handles[0]) }}</div>
-          <div style="grid-column: 1 / -1;" class="meta">点2: {{ getConnectHandleText(junctionDraft.handles[1]) }}</div>
-          <div style="grid-column: 1 / -1;" class="meta">点3: {{ getConnectHandleText(junctionDraft.handles[2]) }}</div>
-          <div style="grid-column: 1 / -1;" class="meta">点4(可选): {{ getConnectHandleText(junctionDraft.handles[3]) }}</div>
-          <div style="grid-column: 1 / -1;" class="meta">已生成路口: {{ junctionMeshes.length }}</div>
-          <div style="grid-column: 1 / -1;" class="meta">当前选择端点: {{ junctionDraft.handles.length }}/4</div>
-          <div v-if="junctionUi.status" style="grid-column: 1 / -1;" class="meta ok-text">{{ junctionUi.status }}</div>
-          <div v-if="junctionUi.lastError" style="grid-column: 1 / -1;" class="meta err-text">{{ junctionUi.lastError }}</div>
-          <div class="row" style="grid-column: 1 / -1; margin-top: 4px;">
-            <button type="button" :disabled="junctionDraft.handles.length < 3 || junctionUi.generating" @click="generateJunctionFromDraft">
-              {{ junctionUi.generating ? '生成中...' : '生成路口' }}
-            </button>
-            <button type="button" @click="clearJunctionDraft">清空路口端点选择</button>
-          </div>
-        </div>
-      </section>
-
-      <section class="panel">
         <h2>选中道路属性</h2>
         <div v-if="selectedRoad" class="grid2">
           <label>road id<input v-model="roadForm.id" /></label>
@@ -276,7 +217,87 @@
         </div>
         <div v-else class="empty">请先在列表或画布中选择道路</div>
       </section>
+
+      <section class="panel">
+        <h2>绘制优化</h2>
+        <div class="grid2">
+          <label style="grid-column: 1 / -1;">道路平滑度
+            <input v-model.number="drawForm.smoothing" type="range" min="0.1" max="0.95" step="0.01" />
+          </label>
+          <label>数值<input v-model.number="drawForm.smoothing" type="number" min="0.1" max="0.95" step="0.01" /></label>
+          <label style="display:flex; align-items:center; gap:8px; padding-top:22px;">
+            <input v-model="drawForm.autoJunction" type="checkbox" />
+            相交自动生成路口
+          </label>
+          <div style="grid-column: 1 / -1;" class="meta">开启后：完成道路时会先做平滑，再尝试在简单十字相交场景自动拆分并生成路口；关闭后只做道路完成，不触发自动路口。</div>
+        </div>
+      </section>
+
+      <section v-if="mode === 'connect'" class="panel">
+        <h2>弯道连接</h2>
+        <div class="grid2">
+          <label style="grid-column: 1 / -1;">贴合强度(越大弯道越“鼓”)
+            <input v-model.number="connectForm.smoothness" type="range" min="0.1" max="0.8" step="0.01" />
+          </label>
+          <label>数值<input v-model.number="connectForm.smoothness" type="number" min="0.1" max="0.8" step="0.01" /></label>
+          <label>端点重叠(m)<input v-model.number="connectForm.overlap" type="number" min="0" max="6" step="0.1" /></label>
+          <div class="meta">连接模式下点击两个端点小球自动生成弯道</div>
+          <div style="grid-column: 1 / -1;" class="meta">第一点: {{ getConnectHandleText(connectDraft.first) }}</div>
+          <div style="grid-column: 1 / -1;" class="meta">第二点: {{ getConnectHandleText(connectDraft.second) }}</div>
+          <div class="row" style="grid-column: 1 / -1; margin-top: 4px;">
+            <button type="button" @click="clearConnectDraft">清空端点选择</button>
+            <button v-if="selectedRoad?.connectorMeta" type="button" @click="rebuildSelectedConnector">重建选中弯道</button>
+          </div>
+        </div>
+      </section>
+
+      <section v-if="mode === 'junction'" class="panel">
+        <h2>自动路口生成</h2>
+        <div class="grid2">
+          <label>边缘留白(m)
+            <input v-model.number="junctionForm.edgePadding" type="number" min="1" step="0.5" />
+          </label>
+          <label>内部平滑度
+            <input v-model.number="junctionForm.smoothness" type="number" min="0.1" max="0.9" step="0.01" />
+          </label>
+          <label style="grid-column: 1 / -1;">车道过渡长度(m)
+            <input v-model.number="junctionForm.transitionLength" type="number" min="3" step="1" />
+          </label>
+          <div style="grid-column: 1 / -1;" class="meta">路口模式下，依次点击 3~4 条彼此分离道路的端点，小球选择逻辑与弯道模式一致。</div>
+          <div style="grid-column: 1 / -1;" class="meta">点1: {{ getConnectHandleText(junctionDraft.handles[0]) }}</div>
+          <div style="grid-column: 1 / -1;" class="meta">点2: {{ getConnectHandleText(junctionDraft.handles[1]) }}</div>
+          <div style="grid-column: 1 / -1;" class="meta">点3: {{ getConnectHandleText(junctionDraft.handles[2]) }}</div>
+          <div style="grid-column: 1 / -1;" class="meta">点4(可选): {{ getConnectHandleText(junctionDraft.handles[3]) }}</div>
+          <div style="grid-column: 1 / -1;" class="meta">已生成路口: {{ junctionMeshes.length }}</div>
+          <div style="grid-column: 1 / -1;" class="meta">当前选择端点: {{ junctionDraft.handles.length }}/4</div>
+          <div v-if="junctionUi.status" style="grid-column: 1 / -1;" class="meta ok-text">{{ junctionUi.status }}</div>
+          <div v-if="junctionUi.lastError" style="grid-column: 1 / -1;" class="meta err-text">{{ junctionUi.lastError }}</div>
+          <div class="row" style="grid-column: 1 / -1; margin-top: 4px;">
+            <button type="button" :disabled="junctionDraft.handles.length < 3 || junctionUi.generating" @click="generateJunctionFromDraft">
+              {{ junctionUi.generating ? '生成中...' : '生成路口' }}
+            </button>
+            <button type="button" @click="clearJunctionDraft">清空路口端点选择</button>
+          </div>
+        </div>
+      </section>
+
     </aside>
+
+    <div v-if="roadCodeDialogVisible" class="dialog-mask" @click.self="roadCodeDialogVisible = false">
+      <div class="dialog">
+        <div class="dialog-head">
+          <h3>Road {{ selectedRoad ? selectedRoad.id : '' }} 代码</h3>
+          <button type="button" class="dialog-close" @click="roadCodeDialogVisible = false">关闭</button>
+        </div>
+        <div class="dialog-raw road-code-panel" style="margin-top: 10px;">
+          <textarea v-model="roadCodeEditorText" class="road-code-editor" spellcheck="false"></textarea>
+        </div>
+        <div class="row" style="margin-top: 10px;">
+          <button type="button" @click="applyRoadCode">应用代码</button>
+          <button type="button" @click="roadCodeEditorText = selectedRoadCode">重置</button>
+        </div>
+      </div>
+    </div>
 
     <div v-if="roadColorDialog.visible" class="dialog-mask" @click.self="closeRoadColorDialog">
       <div class="dialog" style="max-width: 420px;">
@@ -284,25 +305,25 @@
           <h3>显示设置</h3>
           <button type="button" class="dialog-close" @click="closeRoadColorDialog">关闭</button>
         </div>
-        <div class="grid2" style="margin-top: 8px;">
-          <label>全部道路颜色
+        <div class="grid2 settings-grid" style="margin-top: 8px;">
+          <label class="color-setting">全部道路颜色
             <input v-model="roadColorDialog.allColor" type="color" />
           </label>
-          <label>Junction道路颜色
+          <label class="color-setting">Junction道路颜色
             <input v-model="roadColorDialog.junctionColor" type="color" />
           </label>
-          <label style="grid-column: 1 / -1;">Junction区域辅助线颜色
+          <label class="color-setting color-setting-wide">Junction区域辅助线颜色
             <input v-model="roadColorDialog.junctionGuideColor" type="color" />
           </label>
-          <label>道路编号颜色
+          <label class="color-setting">道路编号颜色
             <input v-model="roadColorDialog.roadLabelColor" type="color" />
           </label>
-          <label style="display:flex; align-items:center; gap:8px; padding-top:22px;">
+          <label class="toggle-setting">
             <input v-model="roadColorDialog.showRoadLabels" type="checkbox" />
             显示道路编号
           </label>
-          <div style="grid-column: 1 / -1;" class="meta">这里统一控制道路、路口、路口辅助线以及道路编号的显示效果。</div>
-          <div class="row" style="grid-column: 1 / -1; margin-top: 6px;">
+          <div class="meta settings-note">这里统一控制道路、路口、路口辅助线以及道路编号的显示效果。</div>
+          <div class="row settings-actions">
             <button type="button" @click="applyRoadColorDialog">应用</button>
             <button type="button" @click="resetRoadColorDialogDefaults">恢复默认</button>
           </div>
@@ -386,6 +407,9 @@ const {
   isRoadVisible,
   toggleRoadVisibility,
   roadTreeRows,
+  roadSearchQuery,
+  filteredVirtualRoadRows,
+  filteredRoadTreeRows,
   selectRoad,
   roadListEl,
   handleRoadListScroll,
@@ -416,6 +440,8 @@ const {
   getConnectHandleText,
   clearConnectDraft,
   selectedRoad,
+  selectedRoadCode,
+  applySelectedRoadCode,
   rebuildSelectedConnector,
   junctionForm,
   junctionUi,
@@ -427,4 +453,21 @@ const {
   applySelectedRoad,
   validateDialog
 } = useAppLogic();
+
+import { ref, watch } from 'vue';
+const roadCodeDialogVisible = ref(false);
+const roadCodeEditorText = ref('');
+
+watch(selectedRoadCode, (value) => {
+  roadCodeEditorText.value = value || '';
+}, { immediate: true });
+
+function applyRoadCode() {
+  try {
+    applySelectedRoadCode(roadCodeEditorText.value);
+    roadCodeDialogVisible.value = false;
+  } catch (error) {
+    window.alert(String(error?.message || error));
+  }
+}
 </script>

@@ -78,12 +78,13 @@ echo "[first-run] Node: $(node -v)"
 echo "[first-run] npm:  $(npm -v)"
 echo "[first-run] CMake: $(cmake --version | head -n 1)"
 
-if [ ! -d "node_modules" ]; then
-  echo "[first-run] 安装前端依赖..."
-  npm install
-else
-  echo "[first-run] node_modules 已存在，跳过安装。"
+if [ -d "node_modules" ]; then
+  echo "[first-run] 删除旧的 node_modules..."
+  rm -rf node_modules
 fi
+
+echo "[first-run] 重新安装前端依赖..."
+npm install
 
 echo "[first-run] 编译 native 解析器（首次建议强制编译一次）..."
 bash ./scripts/build-native.sh

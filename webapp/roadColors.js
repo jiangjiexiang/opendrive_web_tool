@@ -8,14 +8,14 @@ export function createRoadColorState() {
       junctionColor: '#ff9b42',
       junctionGuideColor: '#ffdd9b',
       showRoadLabels: true,
-      roadLabelColor: '#111111'
+      roadLabelColor: '#d62828'
     }),
     roadColorConfig: reactive({
       allColor: '#3a92ff',
       junctionColor: '#ff9b42',
       junctionGuideColor: '#ffdd9b',
       showRoadLabels: true,
-      roadLabelColor: '#111111'
+      roadLabelColor: '#d62828'
     })
   };
 }
@@ -47,7 +47,7 @@ export function resetRoadColorDialogDefaults(dialog) {
   dialog.junctionColor = '#ff9b42';
   dialog.junctionGuideColor = '#ffdd9b';
   dialog.showRoadLabels = true;
-  dialog.roadLabelColor = '#111111';
+  dialog.roadLabelColor = '#d62828';
 }
 
 function hexToRgba(hex, alpha) {
