@@ -13,6 +13,7 @@
           <div class="toolbar-group">
             <button type="button" class="mode-btn" :class="{ active: mode === 'draw' }" @click="setMode('draw')">绘制</button>
             <button type="button" class="mode-btn" :class="{ active: mode === 'select' }" @click="setMode('select')">选择</button>
+            <button type="button" class="mode-btn" :class="{ active: mode === 'measure' }" @click="setMode('measure')">测距</button>
             <button type="button" class="mode-btn" :class="{ active: mode === 'connect' }" @click="setMode('connect')">生成弯道</button>
             <button type="button" class="mode-btn" :class="{ active: mode === 'extend' }" @click="setMode('extend')">延伸</button>
             <button type="button" class="mode-btn" :class="{ active: mode === 'junction' }" @click="setMode('junction')">自动生成junction</button>
@@ -153,6 +154,7 @@
             <span>坐标 x={{ formatNum(mouseWorld.x, 2) }}</span>
             <span>坐标 y={{ formatYUp(mouseWorld.y) }}</span>
             <span>yaw={{ formatNum(bgGeo.yaw, 3) }}</span>
+            <span v-if="measureStats.pointCount">测距 点={{ measureStats.pointCount }} | 段={{ measureStats.segmentCount }} | 总长={{ formatNum(measureStats.total, 3) }}m</span>
             <span v-if="hoverRoadCoord.roadId">Road {{ hoverRoadCoord.roadId }} | s={{ formatNum(hoverRoadCoord.s, 2) }} | t={{ formatNum(hoverRoadCoord.t, 2) }}</span>
           </div>
         </div>
@@ -161,7 +163,7 @@
         </div>
       </div>
       <div class="stage-tip">
-        左键交互，滚轮缩放，空格+拖动平移，选择模式可拖当前道路控制点
+        左键交互，滚轮缩放，空格+拖动平移，选择模式可拖当前道路控制点，测距模式可多点测量(米)
         | 原点: x={{ formatNum(bgGeo.originX, 2) }}, y={{ formatYUp(bgGeo.originY) }}, yaw={{ formatNum(bgGeo.yaw, 3) }}
       </div>
     </section>
@@ -435,6 +437,7 @@ const {
   resetRoadColorDialogDefaults,
   headerForm,
   drawForm,
+  measureStats,
   connectForm,
   connectDraft,
   getConnectHandleText,

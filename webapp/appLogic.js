@@ -37,6 +37,8 @@ const roads = ref([]);
 const selectedRoadIndex = ref(-1);
 const mode = ref('select');
 const drawingPoints = ref([]);
+const measurePoints = ref([]);
+const measureHoverPoint = ref(null);
 const connectDraft = ref({ first: null, second: null });
 const extendDraft = ref(null);
 const junctionDraft = ref({ handles: [] });
@@ -708,6 +710,90 @@ function drawPolyline(points, color, width, dashed = false, showPoints = false) 
       ctx.fillStyle = color;
       ctx.fill();
     });
+  }
+}
+
+function buildMeasureStats(includeHover = false) {
+  const points = [];
+  (measurePoints.value || []).forEach((pt) => {
+    points.push({ x: Number(pt.x), y: Number(pt.y) });
+  });
+  if (includeHover && mode.value === 'measure' && measureHoverPoint.value && points.length > 0) {
+    points.push({ x: Number(measureHoverPoint.value.x), y: Number(measureHoverPoint.value.y) });
+  }
+  const segmentLengths = [];
+  let total = 0;
+  for (let i = 1; i < points.length; i += 1) {
+    const len = Math.hypot(points[i].x - points[i - 1].x, points[i].y - points[i - 1].y);
+    segmentLengths.push(len);
+    total += len;
+  }
+  return {
+    pointCount: measurePoints.value.length,
+    segmentCount: Math.max(0, measurePoints.value.length - 1),
+    total,
+    segmentLengths
+  };
+}
+
+const measureStats = computed(() => buildMeasureStats(false));
+
+function drawMeasureLabel(text, sx, sy) {
+  const label = String(text);
+  ctx.save();
+  ctx.font = '12px sans-serif';
+  const w = ctx.measureText(label).width;
+  const padX = 6;
+  const h = 18;
+  const x = sx - w / 2 - padX;
+  const y = sy - h - 10;
+  ctx.fillStyle = 'rgba(7, 14, 26, 0.78)';
+  ctx.fillRect(x, y, w + padX * 2, h);
+  ctx.strokeStyle = 'rgba(120, 210, 255, 0.85)';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(x + 0.5, y + 0.5, w + padX * 2 - 1, h - 1);
+  ctx.fillStyle = '#eaf6ff';
+  ctx.fillText(label, sx - w / 2, y + 13);
+  ctx.restore();
+}
+
+function drawMeasureOverlay() {
+  if (!measurePoints.value.length && !(mode.value === 'measure' && measureHoverPoint.value)) return;
+  const renderPoints = (measurePoints.value || []).map((pt) => ({ x: Number(pt.x), y: Number(pt.y) }));
+  if (mode.value === 'measure' && measureHoverPoint.value && renderPoints.length > 0) {
+    renderPoints.push({
+      x: Number(measureHoverPoint.value.x),
+      y: Number(measureHoverPoint.value.y)
+    });
+  }
+  if (renderPoints.length >= 2) {
+    drawPolyline(renderPoints, '#ffe28a', 2.2, false, false);
+  }
+
+  for (let i = 0; i < measurePoints.value.length; i += 1) {
+    const pt = measurePoints.value[i];
+    const p = worldToScreen(pt.x, pt.y);
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 4.6, 0, Math.PI * 2);
+    ctx.fillStyle = '#fff3b8';
+    ctx.fill();
+    ctx.strokeStyle = '#1b2430';
+    ctx.lineWidth = 1.2;
+    ctx.stroke();
+  }
+
+  const fullStats = buildMeasureStats(true);
+  if (renderPoints.length >= 2) {
+    for (let i = 1; i < renderPoints.length; i += 1) {
+      const a = renderPoints[i - 1];
+      const b = renderPoints[i];
+      const segLen = Math.hypot(b.x - a.x, b.y - a.y);
+      const mid = worldToScreen((a.x + b.x) * 0.5, (a.y + b.y) * 0.5);
+      drawMeasureLabel(`${segLen.toFixed(3)} m`, mid.x, mid.y);
+    }
+    const last = renderPoints[renderPoints.length - 1];
+    const lastS = worldToScreen(last.x, last.y);
+    drawMeasureLabel(`总长 ${fullStats.total.toFixed(3)} m`, lastS.x + 6, lastS.y - 8);
   }
 }
 
@@ -1392,6 +1478,7 @@ function performRender() {
   if (extendDraft.value) {
     drawPolyline([extendDraft.value.anchor, extendDraft.value.hover], '#77f2c8', 2, true);
   }
+  drawMeasureOverlay();
   drawHandles();
 }
 
@@ -3169,6 +3256,7 @@ function setMode(next) {
   extendDraft.value = null;
   junctionDraft.value = { handles: [] };
   endpointDrag.value = null;
+  measureHoverPoint.value = null;
   render();
 }
 
@@ -3312,6 +3400,12 @@ function synchronizeTopologyAfterRoadRemoval(removedRoadId) {
 }
 
 function undoPoint() {
+  if (mode.value === 'measure') {
+    if (!measurePoints.value.length) return;
+    measurePoints.value.pop();
+    render();
+    return;
+  }
   if (!drawingPoints.value.length) return;
   drawingPoints.value.pop();
   render();
@@ -3756,6 +3850,11 @@ function handleCanvasClick(e) {
     render();
     return;
   }
+  if (mode.value === 'measure') {
+    measurePoints.value.push({ x: p.x, y: p.y });
+    render();
+    return;
+  }
   if (mode.value === 'select') {
     selectedRoadIndex.value = pickRoad(p);
     render();
@@ -3893,6 +3992,12 @@ function handleMouseMove(e) {
     mouseWorld.x = world.x;
     mouseWorld.y = world.y;
     updateHoverRoadCoord(mouseWorld);
+    if (mode.value === 'measure') {
+      measureHoverPoint.value = { x: world.x, y: world.y };
+      render();
+    } else if (measureHoverPoint.value) {
+      measureHoverPoint.value = null;
+    }
   }
   if (!canvasEl.value || !extendDraft.value || mode.value !== 'extend') return;
   const rect = canvasEl.value.getBoundingClientRect();
@@ -3926,6 +4031,14 @@ function isEditableElement(target) {
 
 function handleKeyDown(e) {
   if (!isEditableElement(e.target) && e.key === 'Escape') {
+    if (mode.value === 'measure') {
+      e.preventDefault();
+      measurePoints.value = [];
+      measureHoverPoint.value = null;
+      mode.value = 'select';
+      render();
+      return;
+    }
     if (mode.value === 'draw' && drawingPoints.value.length > 0) {
       e.preventDefault();
       drawingPoints.value = [];
@@ -3942,6 +4055,12 @@ function handleKeyDown(e) {
     }
   }
   if (!isEditableElement(e.target) && (e.key === 'Delete' || e.key === 'Backspace')) {
+    if (mode.value === 'measure' && measurePoints.value.length > 0) {
+      e.preventDefault();
+      measurePoints.value.pop();
+      render();
+      return;
+    }
     if (selectedRoadIndex.value >= 0) {
       e.preventDefault();
       deleteRoad();
@@ -4076,6 +4195,7 @@ onBeforeUnmount(() => {
     resetRoadColorDialogDefaults,
     headerForm,
     drawForm,
+    measureStats,
     connectForm,
     connectDraft,
     getConnectHandleText,
