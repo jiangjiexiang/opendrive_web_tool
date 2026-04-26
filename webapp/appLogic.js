@@ -48,6 +48,7 @@ const bgImage = ref(null);
 const mouseWorld = reactive({ x: 0, y: 0 });
 const hoverRoadCoord = reactive({
   roadId: '',
+  laneId: '',
   s: null,
   t: null,
   distance: null
@@ -159,6 +160,27 @@ const collapsedRoadGroups = ref({});
 const roadSearchQuery = ref('');
 
 const selectedRoad = computed(() => roads.value[selectedRoadIndex.value] || null);
+const selectedRoadLaneIds = computed(() => {
+  const road = selectedRoad.value;
+  if (!road) return [];
+  const ids = new Set();
+  (Array.isArray(road.laneSections) ? road.laneSections : []).forEach((section) => {
+    (Array.isArray(section.leftLanes) ? section.leftLanes : []).forEach((lane) => {
+      const id = String(lane?.id ?? '').trim();
+      if (id) ids.add(id);
+    });
+    (Array.isArray(section.rightLanes) ? section.rightLanes : []).forEach((lane) => {
+      const id = String(lane?.id ?? '').trim();
+      if (id) ids.add(id);
+    });
+  });
+  if (ids.size) return [...ids].sort((a, b) => Number(a) - Number(b));
+  const leftCount = Math.max(0, Number(road.leftLaneCount || 0));
+  const rightCount = Math.max(0, Number(road.rightLaneCount || 0));
+  for (let i = 1; i <= leftCount; i += 1) ids.add(String(i));
+  for (let i = 1; i <= rightCount; i += 1) ids.add(String(-i));
+  return [...ids].sort((a, b) => Number(a) - Number(b));
+});
 const selectedRoadCode = computed(() => {
   const road = selectedRoad.value;
   if (!road) return '';
@@ -569,11 +591,6 @@ function projectPointToSeg(p, a, b) {
 function projectPointToRoadST(p, road) {
   const pts = Array.isArray(road?.points) ? road.points : [];
   if (pts.length < 2) return null;
-  const leftLaneCount = Math.max(0, Number(road?.leftLaneCount || 0));
-  const rightLaneCount = Math.max(0, Number(road?.rightLaneCount || 0));
-  const leftLaneWidth = Math.max(0.5, Number(road?.leftLaneWidth || road?.laneWidth || 3.5));
-  const rightLaneWidth = Math.max(0.5, Number(road?.rightLaneWidth || road?.laneWidth || 3.5));
-  const halfWidth = Math.max(1.8, leftLaneCount * leftLaneWidth * 0.5 + rightLaneCount * rightLaneWidth * 0.5);
   let best = null;
   let accS = 0;
   for (let i = 1; i < pts.length; i += 1) {
@@ -582,12 +599,20 @@ function projectPointToRoadST(p, road) {
     const segLen = Math.hypot(b.x - a.x, b.y - a.y);
     if (segLen <= 1e-8) continue;
     const projected = projectPointToSeg(p, a, b);
+    const s = Number.isFinite(Number(a.s)) && Number.isFinite(Number(b.s))
+      ? Number(a.s) + projected.ratio * (Number(b.s) - Number(a.s))
+      : accS + projected.ratio * segLen;
+    const profile = getRoadProfileAtS(road, s);
+    const halfWidth = Math.max(Math.abs(profile.leftBoundary - profile.laneOffset), Math.abs(profile.rightBoundary - profile.laneOffset), 1.8);
     const candidate = {
       roadId: String(road.id ?? ''),
-      s: accS + projected.ratio * segLen,
+      s,
       t: projected.signedOffset,
       distance: projected.distance,
-      halfWidth
+      halfWidth,
+      minT: Math.min(profile.leftBoundary, profile.rightBoundary),
+      maxT: Math.max(profile.leftBoundary, profile.rightBoundary),
+      laneId: getLaneIdAtST(road, s, projected.signedOffset)
     };
     if (!best || candidate.distance < best.distance) {
       best = candidate;
@@ -607,15 +632,20 @@ function updateHoverRoadCoord(worldPoint) {
     if (!best || projected.distance < best.distance) best = projected;
   });
   const maxDistance = best ? Math.max(screenTolerance, Number(best.halfWidth || 0) + 1.5) : screenTolerance;
-  const tWithinRoad = best ? Math.abs(Number(best.t || 0)) <= Number(best.halfWidth || 0) + 0.1 : false;
+  const tWithinRoad = best
+    ? Number(best.t || 0) >= Number(best.minT ?? -best.halfWidth) - 0.1
+      && Number(best.t || 0) <= Number(best.maxT ?? best.halfWidth) + 0.1
+    : false;
   if (!best || best.distance > maxDistance || !tWithinRoad) {
     hoverRoadCoord.roadId = '';
+    hoverRoadCoord.laneId = '';
     hoverRoadCoord.s = null;
     hoverRoadCoord.t = null;
     hoverRoadCoord.distance = null;
     return;
   }
   hoverRoadCoord.roadId = best.roadId;
+  hoverRoadCoord.laneId = best.laneId || '';
   hoverRoadCoord.s = best.s;
   hoverRoadCoord.t = best.t;
   hoverRoadCoord.distance = best.distance;
@@ -654,14 +684,14 @@ function pickRoad(worldPoint) {
   roads.value.forEach((r, idx) => {
     if (r?.visible === false) return;
     if (!r.points || r.points.length < 2) return;
-    const bounds = getRoadBounds(r);
+    const renderData = getRoadRenderData(r);
+    const bounds = renderData?.bounds || getRoadBounds(r);
     if (bounds) {
       if (worldPoint.x < bounds.minX - nearMargin || worldPoint.x > bounds.maxX + nearMargin
         || worldPoint.y < bounds.minY - nearMargin || worldPoint.y > bounds.maxY + nearMargin) {
         return;
       }
     }
-    const renderData = getRoadRenderData(r);
     const centerLine = renderData?.centerRef?.length > 1 ? renderData.centerRef : r.points;
     const centerDist = distPointToPolyline(worldPoint, centerLine);
     const leftLaneCount = Math.max(0, Number(r.leftLaneCount || 0));
@@ -807,10 +837,44 @@ function evaluateLinear(records, sValue, fallback = 0) {
   return active.a + active.b * sValue + active.c * sValue * sValue + active.d * sValue * sValue * sValue;
 }
 
+function getLaneSectionAtS(road, sValue) {
+  const sections = Array.isArray(road?.laneSections) ? road.laneSections : [];
+  if (!sections.length) return null;
+  let active = sections[0];
+  for (let i = 1; i < sections.length; i += 1) {
+    if (sValue >= Number(sections[i]?.s || 0)) active = sections[i];
+    else break;
+  }
+  return active;
+}
+
+function laneWidthAt(lane, sValue, fallbackWidth) {
+  const width = evaluateLinear(lane?.widthProfile, sValue, fallbackWidth || 0);
+  return Math.max(0, Number.isFinite(width) ? width : fallbackWidth || 0);
+}
+
 function getRoadProfileAtS(road, sValue) {
   const laneOffset = evaluateLinear(road.laneOffsetRecords || [{ sOffset: 0, a: 0, b: 0, c: 0, d: 0 }], sValue, 0);
   const fallbackLeftWidth = Number(road.leftLaneWidth || road.laneWidth || 3.5);
   const fallbackRightWidth = Number(road.rightLaneWidth || road.laneWidth || 3.5);
+  const section = getLaneSectionAtS(road, sValue);
+  if (section) {
+    const leftOffsets = [laneOffset];
+    const rightOffsets = [laneOffset];
+    let leftBoundary = laneOffset;
+    let rightBoundary = laneOffset;
+    const leftLanes = Array.isArray(section.leftLanes) ? section.leftLanes : [];
+    const rightLanes = Array.isArray(section.rightLanes) ? section.rightLanes : [];
+    leftLanes.forEach((lane) => {
+      leftBoundary += laneWidthAt(lane, sValue, fallbackLeftWidth);
+      leftOffsets.push(leftBoundary);
+    });
+    rightLanes.forEach((lane) => {
+      rightBoundary -= laneWidthAt(lane, sValue, fallbackRightWidth);
+      rightOffsets.push(rightBoundary);
+    });
+    return { laneOffset, leftOffsets, rightOffsets, leftBoundary, rightBoundary, section };
+  }
   const leftCount = Number(road.leftLaneCount || 0);
   const rightCount = Number(road.rightLaneCount || 0);
   const leftOffsets = [laneOffset];
@@ -825,7 +889,35 @@ function getRoadProfileAtS(road, sValue) {
     rightBoundary -= fallbackRightWidth;
     rightOffsets.push(rightBoundary);
   }
-  return { laneOffset, leftOffsets, rightOffsets, leftBoundary, rightBoundary };
+  return { laneOffset, leftOffsets, rightOffsets, leftBoundary, rightBoundary, section: null };
+}
+
+function getLaneIdAtST(road, sValue, tValue) {
+  const profile = getRoadProfileAtS(road, sValue);
+  const section = profile.section;
+  const t = Number(tValue);
+  if (!Number.isFinite(t)) return '';
+  const leftLanes = Array.isArray(section?.leftLanes) ? section.leftLanes : [];
+  for (let i = 0; i < leftLanes.length; i += 1) {
+    if (t >= profile.leftOffsets[i] - 1e-6 && t <= profile.leftOffsets[i + 1] + 1e-6) {
+      return String(leftLanes[i]?.id ?? i + 1);
+    }
+  }
+  const rightLanes = Array.isArray(section?.rightLanes) ? section.rightLanes : [];
+  for (let i = 0; i < rightLanes.length; i += 1) {
+    if (t <= profile.rightOffsets[i] + 1e-6 && t >= profile.rightOffsets[i + 1] - 1e-6) {
+      return String(rightLanes[i]?.id ?? -(i + 1));
+    }
+  }
+  const fallbackRightCount = Number(road.rightLaneCount || 0);
+  if (fallbackRightCount && t <= profile.laneOffset + 1e-6 && t >= profile.rightBoundary - 1e-6) {
+    return String(-Math.min(fallbackRightCount, Math.max(1, Math.ceil((profile.laneOffset - t) / Math.max(0.1, Number(road.rightLaneWidth || road.laneWidth || 3.5))))));
+  }
+  const fallbackLeftCount = Number(road.leftLaneCount || 0);
+  if (fallbackLeftCount && t >= profile.laneOffset - 1e-6 && t <= profile.leftBoundary + 1e-6) {
+    return String(Math.min(fallbackLeftCount, Math.max(1, Math.ceil((t - profile.laneOffset) / Math.max(0.1, Number(road.leftLaneWidth || road.laneWidth || 3.5))))));
+  }
+  return '';
 }
 
 function buildOffsetPath(road, selector) {
@@ -843,6 +935,83 @@ function buildOffsetPath(road, selector) {
     out.push({ x: sample.x + nx * offset, y: sample.y + ny * offset });
   }
   return out;
+}
+
+function buildLaneBoundaryPaths(road) {
+  const leftCount = Math.max(0, Number(road.leftLaneCount || 0));
+  const rightCount = Math.max(0, Number(road.rightLaneCount || 0));
+  const paths = [];
+  for (let i = 1; i < leftCount; i += 1) {
+    paths.push({ laneId: String(i), points: buildOffsetPath(road, (profile) => profile.leftOffsets[i]) });
+  }
+  for (let i = 1; i < rightCount; i += 1) {
+    paths.push({ laneId: String(-i), points: buildOffsetPath(road, (profile) => profile.rightOffsets[i]) });
+  }
+  return paths;
+}
+
+function getPrimaryLaneSection(road) {
+  const sections = Array.isArray(road?.laneSections) ? road.laneSections : [];
+  return sections.length ? sections[0] : null;
+}
+
+function resolveLaneForward(lane, side) {
+  const travelDir = String(lane?.travelDir || '').trim().toLowerCase();
+  if (travelDir === 'forward' || travelDir === 'forwards') return true;
+  if (travelDir === 'backward' || travelDir === 'backwards' || travelDir === 'reverse') return false;
+  return side === 'right';
+}
+
+function buildLaneArrowSeriesForRoad(road) {
+  const section = getPrimaryLaneSection(road);
+  const series = [];
+  if (section) {
+    const leftLanes = Array.isArray(section.leftLanes) ? section.leftLanes : [];
+    leftLanes.forEach((lane, index) => {
+      const laneIndex = index + 1;
+      const path = buildOffsetPath(road, (profile) => (
+        (Number(profile.leftOffsets[laneIndex - 1] ?? profile.laneOffset)
+          + Number(profile.leftOffsets[laneIndex] ?? profile.leftBoundary)) * 0.5
+      ));
+      series.push({
+        laneId: String(lane?.id ?? laneIndex),
+        side: 'left',
+        arrows: buildArrowSeries(path, resolveLaneForward(lane, 'left'))
+      });
+    });
+    const rightLanes = Array.isArray(section.rightLanes) ? section.rightLanes : [];
+    rightLanes.forEach((lane, index) => {
+      const laneIndex = index + 1;
+      const path = buildOffsetPath(road, (profile) => (
+        (Number(profile.rightOffsets[laneIndex - 1] ?? profile.laneOffset)
+          + Number(profile.rightOffsets[laneIndex] ?? profile.rightBoundary)) * 0.5
+      ));
+      series.push({
+        laneId: String(lane?.id ?? -laneIndex),
+        side: 'right',
+        arrows: buildArrowSeries(path, resolveLaneForward(lane, 'right'))
+      });
+    });
+    return series;
+  }
+
+  const leftCount = Math.max(0, Number(road.leftLaneCount || 0));
+  const rightCount = Math.max(0, Number(road.rightLaneCount || 0));
+  for (let i = 1; i <= leftCount; i += 1) {
+    const path = buildOffsetPath(road, (profile) => (
+      (Number(profile.leftOffsets[i - 1] ?? profile.laneOffset)
+        + Number(profile.leftOffsets[i] ?? profile.leftBoundary)) * 0.5
+    ));
+    series.push({ laneId: String(i), side: 'left', arrows: buildArrowSeries(path, false) });
+  }
+  for (let i = 1; i <= rightCount; i += 1) {
+    const path = buildOffsetPath(road, (profile) => (
+      (Number(profile.rightOffsets[i - 1] ?? profile.laneOffset)
+        + Number(profile.rightOffsets[i] ?? profile.rightBoundary)) * 0.5
+    ));
+    series.push({ laneId: String(-i), side: 'right', arrows: buildArrowSeries(path, true) });
+  }
+  return series;
 }
 
 function drawFilledBand(leftPath, rightPath, fillStyle) {
@@ -1024,12 +1193,14 @@ function getRoadRenderData(road) {
   const nativeRightBoundaryRef = road.nativeRightBoundary;
   const nativeLaneBoundariesRef = road.nativeLaneBoundaries;
   const laneOffsetRecordsRef = road.laneOffsetRecords;
+  const laneSectionsRef = road.laneSections;
   const unchanged = cache
     && cache.pointsRef === pointsRef
     && cache.nativeLeftBoundaryRef === nativeLeftBoundaryRef
     && cache.nativeRightBoundaryRef === nativeRightBoundaryRef
     && cache.nativeLaneBoundariesRef === nativeLaneBoundariesRef
     && cache.laneOffsetRecordsRef === laneOffsetRecordsRef
+    && cache.laneSectionsRef === laneSectionsRef
     && cache.leftLaneCount === leftLaneCount
     && cache.rightLaneCount === rightLaneCount
     && cache.leftLaneWidth === leftLaneWidth
@@ -1044,12 +1215,13 @@ function getRoadRenderData(road) {
     centerRef: hasNativeBoundaries ? road.points || [] : buildOffsetPath(road, (profile) => profile.laneOffset),
     leftBoundary: hasNativeBoundaries ? road.nativeLeftBoundary : buildOffsetPath(road, (profile) => profile.leftBoundary),
     rightBoundary: hasNativeBoundaries ? road.nativeRightBoundary : buildOffsetPath(road, (profile) => profile.rightBoundary),
-    laneBoundaries: hasNativeBoundaries ? (road.nativeLaneBoundaries || []) : [],
+    laneBoundaries: hasNativeBoundaries ? (road.nativeLaneBoundaries || []) : buildLaneBoundaryPaths(road),
+    laneArrowSeries: buildLaneArrowSeriesForRoad(road),
     leftArrowPath: leftLaneCount > 0 ? buildOffsetPath(road, (p) => (p.laneOffset + p.leftBoundary) * 0.5) : [],
     rightArrowPath: rightLaneCount > 0 ? buildOffsetPath(road, (p) => (p.laneOffset + p.rightBoundary) * 0.5) : []
   };
-  data.leftArrowSeries = buildArrowSeries(data.leftArrowPath, true);
-  data.rightArrowSeries = buildArrowSeries(data.rightArrowPath, false);
+  data.leftArrowSeries = buildArrowSeries(data.leftArrowPath, false);
+  data.rightArrowSeries = buildArrowSeries(data.rightArrowPath, true);
   data.labelPoint = getPolylineMidpoint(data.centerRef) || getPolylineMidpoint(road.points || []);
   const bounds = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity };
   appendPointsBounds(bounds, data.leftBoundary);
@@ -1063,6 +1235,7 @@ function getRoadRenderData(road) {
     nativeRightBoundaryRef,
     nativeLaneBoundariesRef,
     laneOffsetRecordsRef,
+    laneSectionsRef,
     leftLaneCount,
     rightLaneCount,
     leftLaneWidth,
@@ -1150,6 +1323,11 @@ function drawRoadSurface(road, selected, renderData = null, options = {}) {
   drawFilledBand(resolvedRenderData.leftBoundary, resolvedRenderData.rightBoundary, palette.fill);
   drawPolyline(resolvedRenderData.leftBoundary, palette.edge, selected ? 2.2 : 1.6);
   drawPolyline(resolvedRenderData.rightBoundary, palette.edge, selected ? 2.2 : 1.6);
+  if (options.showLaneMarkings || selected) {
+    resolvedRenderData.laneBoundaries.forEach((lane) => {
+      if (lane?.points?.length > 1) drawPolyline(lane.points, palette.lane, selected ? 1.4 : 1, true);
+    });
+  }
   if (!options.suppressCenterline || selected) {
     drawPolyline(resolvedRenderData.centerRef, palette.center, selected ? 2.8 : 1.6, true);
   }
@@ -1256,10 +1434,12 @@ function drawOriginAxes() {
 }
 
 function drawArrowAtWorld(x, y, dirX, dirY, color) {
-  const dirLen = Math.hypot(dirX, dirY);
+  const screenDirX = Number(dirX);
+  const screenDirY = -Number(dirY);
+  const dirLen = Math.hypot(screenDirX, screenDirY);
   if (dirLen < 1e-6) return;
-  const ux = dirX / dirLen;
-  const uy = dirY / dirLen;
+  const ux = screenDirX / dirLen;
+  const uy = screenDirY / dirLen;
   const nX = -uy;
   const nY = ux;
   const p = worldToScreen(x, y);
@@ -1280,6 +1460,15 @@ function drawLaneDirectionArrows(road, renderData = null) {
   if (!road.points || road.points.length < 2) return;
   const resolvedRenderData = renderData || getRoadRenderData(road);
   if (!resolvedRenderData) return;
+  if (Array.isArray(resolvedRenderData.laneArrowSeries) && resolvedRenderData.laneArrowSeries.length) {
+    resolvedRenderData.laneArrowSeries.forEach((laneSeries) => {
+      const color = laneSeries.side === 'right' ? 'rgba(124, 240, 213, 0.92)' : 'rgba(255, 194, 124, 0.92)';
+      (laneSeries.arrows || []).forEach((arrow) => {
+        drawArrowAtWorld(arrow.x, arrow.y, arrow.dirX, arrow.dirY, color);
+      });
+    });
+    return;
+  }
   resolvedRenderData.rightArrowSeries.forEach((arrow) => {
     drawArrowAtWorld(arrow.x, arrow.y, arrow.dirX, arrow.dirY, 'rgba(124, 240, 213, 0.92)');
   });
@@ -1440,7 +1629,8 @@ function performRender() {
   let visiblePointCount = 0;
   roads.value.forEach((r, idx) => {
     if (r?.visible === false) return;
-    const bounds = getRoadBounds(r);
+    const renderData = getRoadRenderData(r);
+    const bounds = renderData?.bounds || getRoadBounds(r);
     if (bounds && viewportBounds && !boundsIntersect(bounds, viewportBounds)) return;
     visibleRoads.push({ road: r, idx });
     visiblePointCount += Array.isArray(r.points) ? r.points.length : 0;
@@ -1627,6 +1817,7 @@ function defaultRoadFromPoints(points) {
     editPoints: points.map((pt) => ({ x: Number(pt.x), y: Number(pt.y) })),
     points,
     laneOffsetRecords: [{ sOffset: 0, a: 0, b: 0, c: 0, d: 0 }],
+    laneSections: [],
     nativeLeftBoundary: null,
     nativeRightBoundary: null,
     nativeLaneBoundaries: null,
@@ -3515,7 +3706,16 @@ function applySelectedRoadCode(codeText) {
       road.successorType = roadDetails.successorType || road.successorType;
       road.successorId = String(roadDetails.successorId || road.successorId || '');
       road.successorContactPoint = roadDetails.successorContactPoint || road.successorContactPoint;
+      if (Array.isArray(roadDetails.laneOffsetRecords) && roadDetails.laneOffsetRecords.length) {
+        road.laneOffsetRecords = roadDetails.laneOffsetRecords.map((record) => ({ ...record }));
+      }
       if (Array.isArray(roadDetails.laneSectionsSpec) && roadDetails.laneSectionsSpec.length) {
+        road.laneSections = roadDetails.laneSectionsSpec.map((section) => ({
+          ...section,
+          leftLanes: Array.isArray(section?.leftLanes) ? section.leftLanes.map((lane) => ({ ...lane })) : [],
+          rightLanes: Array.isArray(section?.rightLanes) ? section.rightLanes.map((lane) => ({ ...lane })) : [],
+          laneLinks: { ...(section?.laneLinks || {}) }
+        }));
         road.laneSectionsSpec = roadDetails.laneSectionsSpec.map((section) => ({
           ...section,
           laneLinks: { ...(section?.laneLinks || {}) }
@@ -3564,6 +3764,12 @@ function applySelectedRoadCode(codeText) {
     if (payload.length !== undefined) road.length = Number(payload.length || road.length || 0);
   }
   if (Array.isArray(payload.laneSectionsSpec)) {
+    road.laneSections = payload.laneSectionsSpec.map((section) => ({
+      ...section,
+      leftLanes: Array.isArray(section?.leftLanes) ? section.leftLanes.map((lane) => ({ ...lane })) : [],
+      rightLanes: Array.isArray(section?.rightLanes) ? section.rightLanes.map((lane) => ({ ...lane })) : [],
+      laneLinks: { ...(section?.laneLinks || {}) }
+    }));
     road.laneSectionsSpec = payload.laneSectionsSpec.map((section) => ({
       ...section,
       laneLinks: { ...(section?.laneLinks || {}) }
@@ -3706,6 +3912,7 @@ function applyNativeRoads(parsedRoads, importedJunctions = [], importedRoadDetai
     successorId: String(r.successorId ?? r.id ?? idx + 1),
     successorContactPoint: String(r.successorContactPoint || 'start'),
     laneOffsetRecords: [{ sOffset: 0, a: 0, b: 0, c: 0, d: 0 }],
+    laneSections: [],
     editPoints: Array.isArray(r.editPoints) && r.editPoints.length >= 2
       ? r.editPoints.map((p) => ({ x: Number(p.x), y: Number(p.y) }))
       : defaultEditPoints(Array.isArray(r.points) && r.points.length >= 2
@@ -3728,6 +3935,19 @@ function applyNativeRoads(parsedRoads, importedJunctions = [], importedRoadDetai
     road.successorType = detail.successorType || road.successorType;
     road.successorId = String(detail.successorId || road.successorId || '');
     road.successorContactPoint = detail.successorContactPoint || road.successorContactPoint;
+    if (Array.isArray(detail.laneOffsetRecords) && detail.laneOffsetRecords.length) {
+      road.laneOffsetRecords = detail.laneOffsetRecords.map((record) => ({ ...record }));
+    }
+    if (Array.isArray(detail.laneSectionsSpec) && detail.laneSectionsSpec.length) {
+      road.laneSections = detail.laneSectionsSpec.map((section) => ({
+        ...section,
+        leftLanes: Array.isArray(section?.leftLanes) ? section.leftLanes.map((lane) => ({ ...lane })) : [],
+        rightLanes: Array.isArray(section?.rightLanes) ? section.rightLanes.map((lane) => ({ ...lane })) : [],
+        laneLinks: { ...(section?.laneLinks || {}) }
+      }));
+      road.leftLaneCount = Math.max(road.leftLaneCount, ...road.laneSections.map((section) => section.leftLanes.length));
+      road.rightLaneCount = Math.max(road.rightLaneCount, ...road.laneSections.map((section) => section.rightLanes.length));
+    }
     if (Array.isArray(detail.laneSectionsSpec) && detail.laneSectionsSpec.length) {
       road.laneSectionsSpec = detail.laneSectionsSpec.map((section) => ({
         ...section,
@@ -4201,6 +4421,7 @@ onBeforeUnmount(() => {
     getConnectHandleText,
     clearConnectDraft,
     selectedRoad,
+    selectedRoadLaneIds,
     selectedRoadCode,
     rebuildSelectedConnector,
     junctionForm,

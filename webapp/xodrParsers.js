@@ -15,6 +15,68 @@ function resolveXodrContext(source) {
   return parseXodrDoc(source);
 }
 
+function parseAttrNum(node, name, fallback = 0) {
+  if (!node || !node.hasAttribute(name)) return fallback;
+  const value = Number(node.getAttribute(name));
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function makeAbsoluteCubicRecord(a, b, c, d, sOrigin) {
+  return {
+    sOffset: sOrigin,
+    a: a - b * sOrigin + c * sOrigin * sOrigin - d * sOrigin * sOrigin * sOrigin,
+    b: b - 2 * c * sOrigin + 3 * d * sOrigin * sOrigin,
+    c: c - 3 * d * sOrigin,
+    d
+  };
+}
+
+function parseCubicRecords(nodes, originAttr, sOrigin = 0) {
+  return Array.from(nodes || [])
+    .map((node) => makeAbsoluteCubicRecord(
+      parseAttrNum(node, 'a', 0),
+      parseAttrNum(node, 'b', 0),
+      parseAttrNum(node, 'c', 0),
+      parseAttrNum(node, 'd', 0),
+      sOrigin + parseAttrNum(node, originAttr, 0)
+    ))
+    .sort((a, b) => a.sOffset - b.sOffset);
+}
+
+function parseLaneOffsetRecords(roadEl) {
+  const records = parseCubicRecords(roadEl.querySelectorAll(':scope > lanes > laneOffset'), 's', 0);
+  return records.length ? records : [{ sOffset: 0, a: 0, b: 0, c: 0, d: 0 }];
+}
+
+function sortLaneNodes(nodes, side) {
+  return Array.from(nodes || [])
+    .map((laneEl) => ({ laneEl, id: Number(laneEl.getAttribute('id')) }))
+    .filter((item) => Number.isFinite(item.id) && (side === 'left' ? item.id > 0 : item.id < 0))
+    .sort((a, b) => Math.abs(a.id) - Math.abs(b.id) || a.id - b.id)
+    .map((item) => item.laneEl);
+}
+
+function parseLaneWidthRecords(laneEl, sectionS) {
+  const records = parseCubicRecords(laneEl.querySelectorAll(':scope > width'), 'sOffset', sectionS);
+  return records.length ? records : [{ sOffset: sectionS, a: 0, b: 0, c: 0, d: 0 }];
+}
+
+function parseLane(laneEl, sectionS) {
+  const laneId = String(laneEl.getAttribute('id') || '').trim();
+  const linkEl = laneEl.querySelector(':scope > link');
+  const predEl = linkEl?.querySelector(':scope > predecessor');
+  const succEl = linkEl?.querySelector(':scope > successor');
+  const vectorLaneEl = laneEl.querySelector(':scope > userData > vectorLane');
+  return {
+    id: laneId,
+    type: laneEl.getAttribute('type') || 'none',
+    travelDir: vectorLaneEl?.getAttribute('travelDir') || '',
+    widthProfile: parseLaneWidthRecords(laneEl, sectionS),
+    predecessor: predEl?.getAttribute('id') ?? '',
+    successor: succEl?.getAttribute('id') ?? ''
+  };
+}
+
 export function parseHeaderFromXodr(source) {
   const { root } = resolveXodrContext(source);
   const header = root.querySelector(':scope > header');
@@ -91,6 +153,11 @@ export function parseRoadDetailsFromXodr(source) {
     }
     detail.laneSectionsSpec = Array.from(roadEl.querySelectorAll(':scope > lanes > laneSection')).map((sectionEl) => {
       const laneLinks = {};
+      const sectionS = Number(sectionEl.getAttribute('s') || 0);
+      const leftLanes = sortLaneNodes(sectionEl.querySelectorAll(':scope > left > lane'), 'left')
+        .map((laneEl) => parseLane(laneEl, sectionS));
+      const rightLanes = sortLaneNodes(sectionEl.querySelectorAll(':scope > right > lane'), 'right')
+        .map((laneEl) => parseLane(laneEl, sectionS));
       const laneEls = Array.from(sectionEl.querySelectorAll(':scope > left > lane, :scope > center > lane, :scope > right > lane'));
       laneEls.forEach((laneEl) => {
         const laneId = String(laneEl.getAttribute('id') || '').trim();
@@ -106,14 +173,18 @@ export function parseRoadDetailsFromXodr(source) {
         };
       });
       return {
-        s: Number(sectionEl.getAttribute('s') || 0),
+        s: sectionS,
         singleSide: String(sectionEl.getAttribute('singleSide') || ''),
+        centerType: sectionEl.querySelector(':scope > center > lane')?.getAttribute('type') || 'none',
+        leftLanes,
+        rightLanes,
         laneLinks
       };
     });
+    detail.laneOffsetRecords = parseLaneOffsetRecords(roadEl);
     if (pred != null || succ != null) {
       details[rid] = detail;
-    } else if (detail.laneSectionsSpec.length) {
+    } else if (detail.laneSectionsSpec.length || detail.laneOffsetRecords.length) {
       details[rid] = detail;
     }
   });

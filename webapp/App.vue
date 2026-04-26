@@ -155,7 +155,7 @@
             <span>坐标 y={{ formatYUp(mouseWorld.y) }}</span>
             <span>yaw={{ formatNum(bgGeo.yaw, 3) }}</span>
             <span v-if="measureStats.pointCount">测距 点={{ measureStats.pointCount }} | 段={{ measureStats.segmentCount }} | 总长={{ formatNum(measureStats.total, 3) }}m</span>
-            <span v-if="hoverRoadCoord.roadId">Road {{ hoverRoadCoord.roadId }} | s={{ formatNum(hoverRoadCoord.s, 2) }} | t={{ formatNum(hoverRoadCoord.t, 2) }}</span>
+            <span v-if="hoverRoadCoord.roadId">Road {{ hoverRoadCoord.roadId }} | Lane {{ hoverRoadCoord.laneId || '-' }} | s={{ formatNum(hoverRoadCoord.s, 2) }} | t={{ formatNum(hoverRoadCoord.t, 2) }}</span>
           </div>
         </div>
         <div ref="canvasWrap" class="canvas-wrap">
@@ -188,6 +188,7 @@
           <label>junction<input v-model="roadForm.junction" /></label>
           <label>left lanes<input v-model.number="roadForm.leftLaneCount" type="number" min="0" /></label>
           <label>right lanes<input v-model.number="roadForm.rightLaneCount" type="number" min="0" /></label>
+          <label style="grid-column: 1 / -1;">lane id<input :value="selectedRoadLaneIds.length ? selectedRoadLaneIds.join(', ') : '-'" readonly /></label>
           <label>left width<input v-model.number="roadForm.leftLaneWidth" type="number" min="0.5" step="0.1" /></label>
           <label>right width<input v-model.number="roadForm.rightLaneWidth" type="number" min="0.5" step="0.1" /></label>
           <label>length(m)<input v-model.number="roadForm.length" type="number" min="0.1" step="0.1" /></label>
@@ -443,6 +444,7 @@ const {
   getConnectHandleText,
   clearConnectDraft,
   selectedRoad,
+  selectedRoadLaneIds,
   selectedRoadCode,
   applySelectedRoadCode,
   rebuildSelectedConnector,
