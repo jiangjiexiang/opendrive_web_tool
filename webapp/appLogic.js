@@ -1,5 +1,7 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { rotateVec } from './editorUtils.js';
+import { buildLineArcGeometryFromPoints as buildGeneratedLineArcGeometry } from './lineArcGeometry.js';
+import { selectedRoadToOpenDriveXml } from './roadOpenDriveXml.js';
 import {
   parseXodrDoc,
   parseHeaderFromXodr,
@@ -95,7 +97,8 @@ const roadForm = reactive({
   predecessorType: 'road',
   predecessorId: '',
   successorType: 'road',
-  successorId: ''
+  successorId: '',
+  laneLinks: []
 });
 
 const connectForm = reactive({
@@ -181,35 +184,15 @@ const selectedRoadLaneIds = computed(() => {
   for (let i = 1; i <= rightCount; i += 1) ids.add(String(-i));
   return [...ids].sort((a, b) => Number(a) - Number(b));
 });
+
 const selectedRoadCode = computed(() => {
   const road = selectedRoad.value;
   if (!road) return '';
   const roadId = String(road.id ?? '').trim();
   const importedRaw = String(rawRoadXmlById.value?.[roadId] || '').trim();
-  if (importedRaw) return importedRaw;
-  return JSON.stringify({
-    id: road.id,
-    junction: road.junction,
-    predecessorType: road.predecessorType,
-    predecessorId: road.predecessorId,
-    successorType: road.successorType,
-    successorId: road.successorId,
-    leftLaneCount: road.leftLaneCount,
-    rightLaneCount: road.rightLaneCount,
-    leftLaneWidth: road.leftLaneWidth,
-    rightLaneWidth: road.rightLaneWidth,
-    centerType: road.centerType,
-    length: road.length,
-    points: Array.isArray(road.points)
-      ? road.points.map((p) => ({
-        x: Number(p.x),
-        y: Number(p.y),
-        s: Number.isFinite(Number(p.s)) ? Number(p.s) : undefined,
-        hdg: Number.isFinite(Number(p.hdg)) ? Number(p.hdg) : undefined
-      }))
-      : [],
-    geometry: Array.isArray(road.geometry) ? road.geometry : []
-  }, null, 2);
+  const isDirty = Boolean(dirtyRoadIds.value?.[roadId]);
+  if (importedRaw && !isDirty) return importedRaw;
+  return selectedRoadToOpenDriveXml(road);
 });
 const useVirtualRoadList = computed(() => roads.value.length >= 500);
 const roadListWindowCount = computed(() => {
@@ -290,6 +273,71 @@ const filteredRoadTreeRows = computed(() => {
   });
 });
 
+function laneLinkRowsForRoadForm(road) {
+  const section = Array.isArray(road?.laneSectionsSpec) && road.laneSectionsSpec.length
+    ? road.laneSectionsSpec[0]
+    : Array.isArray(road?.laneSections) && road.laneSections.length
+      ? road.laneSections[0]
+      : null;
+  const laneLinks = section?.laneLinks && typeof section.laneLinks === 'object'
+    ? section.laneLinks
+    : {};
+  const laneIds = new Set();
+  (Array.isArray(section?.leftLanes) ? section.leftLanes : []).forEach((lane) => laneIds.add(String(lane.id)));
+  (Array.isArray(section?.rightLanes) ? section.rightLanes : []).forEach((lane) => laneIds.add(String(lane.id)));
+  if (!laneIds.size) {
+    const leftCount = Math.max(0, Number(road?.leftLaneCount || 0));
+    const rightCount = Math.max(0, Number(road?.rightLaneCount || 0));
+    for (let i = 1; i <= leftCount; i += 1) laneIds.add(String(i));
+    for (let i = 1; i <= rightCount; i += 1) laneIds.add(String(-i));
+  }
+  Object.keys(laneLinks).forEach((laneId) => laneIds.add(String(laneId)));
+  return [...laneIds]
+    .filter((laneId) => laneId !== '0')
+    .sort((a, b) => Number(a) - Number(b))
+    .map((laneId) => ({
+      laneId,
+      predecessor: laneLinks[laneId]?.predecessor ?? '',
+      successor: laneLinks[laneId]?.successor ?? ''
+    }));
+}
+
+function applyRoadFormLaneLinks(road) {
+  const laneLinks = {};
+  (Array.isArray(roadForm.laneLinks) ? roadForm.laneLinks : []).forEach((row) => {
+    const laneId = String(row?.laneId ?? '').trim();
+    if (!laneId || laneId === '0') return;
+    const predecessor = String(row?.predecessor ?? '').trim();
+    const successor = String(row?.successor ?? '').trim();
+    if (!predecessor && !successor) return;
+    laneLinks[laneId] = {};
+    if (predecessor) laneLinks[laneId].predecessor = predecessor;
+    if (successor) laneLinks[laneId].successor = successor;
+  });
+  const sectionBase = Array.isArray(road.laneSectionsSpec) && road.laneSectionsSpec.length
+    ? { ...road.laneSectionsSpec[0] }
+    : Array.isArray(road.laneSections) && road.laneSections.length
+      ? { ...road.laneSections[0] }
+      : {
+        s: 0,
+        leftLaneCount: road.leftLaneCount,
+        rightLaneCount: road.rightLaneCount,
+        leftLaneWidth: road.leftLaneWidth,
+        rightLaneWidth: road.rightLaneWidth,
+        centerType: road.centerType
+      };
+  const nextSection = {
+    ...sectionBase,
+    laneLinks
+  };
+  road.laneSectionsSpec = [nextSection];
+  road.laneSections = [{
+    ...nextSection,
+    leftLanes: Array.isArray(nextSection.leftLanes) ? nextSection.leftLanes.map((lane) => ({ ...lane })) : [],
+    rightLanes: Array.isArray(nextSection.rightLanes) ? nextSection.rightLanes.map((lane) => ({ ...lane })) : []
+  }];
+}
+
 watch(selectedRoad, (road) => {
   if (!road) return;
   roadForm.id = road.id;
@@ -304,6 +352,7 @@ watch(selectedRoad, (road) => {
   roadForm.predecessorId = road.predecessorId || '';
   roadForm.successorType = road.successorType || 'road';
   roadForm.successorId = road.successorId || '';
+  roadForm.laneLinks = laneLinkRowsForRoadForm(road);
   if (road.connectorMeta?.smoothness) {
     connectForm.smoothness = Number(road.connectorMeta.smoothness);
   }
@@ -311,6 +360,26 @@ watch(selectedRoad, (road) => {
     connectForm.overlap = Number(road.connectorMeta.overlap);
   }
 });
+
+watch(
+  () => [roadForm.leftLaneCount, roadForm.rightLaneCount],
+  () => {
+    const existing = new Map((Array.isArray(roadForm.laneLinks) ? roadForm.laneLinks : [])
+      .map((row) => [String(row.laneId), row]));
+    const rows = [];
+    const leftCount = Math.max(0, Number(roadForm.leftLaneCount || 0));
+    const rightCount = Math.max(0, Number(roadForm.rightLaneCount || 0));
+    for (let i = rightCount; i >= 1; i -= 1) {
+      const laneId = String(-i);
+      rows.push(existing.get(laneId) || { laneId, predecessor: '', successor: '' });
+    }
+    for (let i = 1; i <= leftCount; i += 1) {
+      const laneId = String(i);
+      rows.push(existing.get(laneId) || { laneId, predecessor: '', successor: '' });
+    }
+    roadForm.laneLinks = rows;
+  }
+);
 
 watch(
   () => [headerForm.name, headerForm.vendor, headerForm.north, headerForm.south, headerForm.east, headerForm.west],
@@ -2589,6 +2658,20 @@ function applyConnectorGeometryToRoad(road, startPose, endPose) {
   return true;
 }
 
+function applyLineArcGeometryToRoad(road, points) {
+  const built = buildGeneratedLineArcGeometry(points);
+  if (!built) return false;
+  road.geometry = built.geometry;
+  road.length = built.length;
+  const sampled = sampleGeometryToPoints(built.geometry, 0.45);
+  if (sampled.length >= 2) {
+    road.points = sampled;
+    road.editPoints = [sampled[0], sampled[sampled.length - 1]];
+  }
+  clearNativeGeometry(road);
+  return true;
+}
+
 function extendRoadEndpointToBoundary(road, endpoint, boundary) {
   const pts = getRoadEditPoints(road);
   if (pts.length < 2) return;
@@ -2916,26 +2999,14 @@ function generateJunctionFromHandles(handles) {
         smoothing: junctionForm.smoothness
       }
     );
-    const sasApplied = applySasGeometryToRoadSafe(
-      connectorRoad,
-      {
-        x: Number(primary.from.boundary?.x ?? primary.centerline.points[0]?.x ?? 0),
-        y: Number(primary.from.boundary?.y ?? primary.centerline.points[0]?.y ?? 0),
-        hdg: Math.atan2(primary.from.incomingDir?.y || 0, primary.from.incomingDir?.x || 1)
-      },
-      {
-        x: Number(primary.to.boundary?.x ?? primary.centerline.points[primary.centerline.points.length - 1]?.x ?? 0),
-        y: Number(primary.to.boundary?.y ?? primary.centerline.points[primary.centerline.points.length - 1]?.y ?? 0),
-        hdg: Math.atan2(primary.to.outgoingDir?.y || 0, primary.to.outgoingDir?.x || 1)
-      },
-      getConnectorSasTune(primary.from.road.id, primary.from.handle.endpoint, primary.to.road.id, primary.to.handle.endpoint)
-    );
-    if (!sasApplied) {
+    const lineArcApplied = applyLineArcGeometryToRoad(connectorRoad, primary.centerline.points);
+    if (!lineArcApplied) {
       return {
         ok: false,
-        reason: `自动路口生成失败：道路 ${primary.from.road.id} 到 ${primary.to.road.id} 无法生成 spiral-arc-spiral，请调整道路位置、方向或减少复杂度后重试。`
+        reason: `自动路口生成失败：道路 ${primary.from.road.id} 到 ${primary.to.road.id} 无法生成 line/arc 连接几何，请调整道路位置、方向或减少复杂度后重试。`
       };
     }
+    sasFallbackCount += 1;
     connectorRoad.junction = String(meshId);
     const leftStartCount = leftSpec ? leftSpec.links.fromCount : 0;
     const rightStartCount = rightSpec ? rightSpec.links.fromCount : 0;
@@ -3095,7 +3166,7 @@ function generateJunctionFromHandles(handles) {
     ok: true,
     generatedCount: generatedRoadIds.length,
     expectedCount: expectedConnectorCount,
-    sasFallbackCount: 0
+    sasFallbackCount
   };
 }
 
@@ -3119,10 +3190,10 @@ function generateJunctionFromDraft() {
     }
     junctionUi.lastGeneratedCount = Number(result.generatedCount || 0);
     junctionUi.lastExpectedCount = Number(result.expectedCount || 0);
-    const sasFallbackCount = Number(result.sasFallbackCount || 0);
+    const lineArcGeometryCount = Number(result.sasFallbackCount || 0);
     junctionUi.status = `已生成 ${junctionUi.lastGeneratedCount}/${junctionUi.lastExpectedCount} 条连接道路`;
-    if (sasFallbackCount > 0) {
-      junctionUi.status += `（${sasFallbackCount} 条使用了回退几何）`;
+    if (lineArcGeometryCount > 0) {
+      junctionUi.status += `（${lineArcGeometryCount} 条使用 line/arc 几何）`;
     }
   } catch (error) {
     const message = error?.message || String(error || '未知错误');
@@ -3217,18 +3288,7 @@ function connectRoadsWithBezier(firstHandle, secondHandle, smoothness) {
     : createRoadFromPoints(points, {}, { bezierSegments });
   const profile = blendedConnectorProfile(firstRoad, firstHandle.endpoint, secondRoad, secondHandle.endpoint);
   applyRoadShape(targetRoad, points, { bezierSegments });
-  const p0 = roadPoseAtEnd(firstRoad, firstHandle.endpoint === 'start');
-  const p3 = roadPoseAtEnd(secondRoad, secondHandle.endpoint === 'start');
-  if (p0 && p3) {
-    const d0 = endpointDirection(firstHandle.endpoint, p0.hdg);
-    const d3 = endpointFinalDirection(secondHandle.endpoint, p3.hdg);
-    applySasGeometryToRoadSafe(
-      targetRoad,
-      { x: p0.x, y: p0.y, hdg: Math.atan2(d0.y, d0.x) },
-      { x: p3.x, y: p3.y, hdg: Math.atan2(d3.y, d3.x) },
-      getConnectorSasTune(firstRoad.id, firstHandle.endpoint, secondRoad.id, secondHandle.endpoint)
-    );
-  }
+  applyLineArcGeometryToRoad(targetRoad, points);
   targetRoad.leftLaneCount = profile.leftLaneCount;
   targetRoad.rightLaneCount = profile.rightLaneCount;
   targetRoad.leftLaneWidth = profile.leftLaneWidth;
@@ -3288,18 +3348,7 @@ function rebuildSelectedConnector() {
   if (!built) return;
   const profile = blendedConnectorProfile(roads.value[fromIdx], firstHandle.endpoint, roads.value[toIdx], secondHandle.endpoint);
   applyRoadShape(road, built.points, { bezierSegments: built.bezierSegments });
-  const p0 = roadPoseAtEnd(roads.value[fromIdx], firstHandle.endpoint === 'start');
-  const p3 = roadPoseAtEnd(roads.value[toIdx], secondHandle.endpoint === 'start');
-  if (p0 && p3) {
-    const d0 = endpointDirection(firstHandle.endpoint, p0.hdg);
-    const d3 = endpointFinalDirection(secondHandle.endpoint, p3.hdg);
-    applySasGeometryToRoadSafe(
-      road,
-      { x: p0.x, y: p0.y, hdg: Math.atan2(d0.y, d0.x) },
-      { x: p3.x, y: p3.y, hdg: Math.atan2(d3.y, d3.x) },
-      getConnectorSasTune(roads.value[fromIdx].id, firstHandle.endpoint, roads.value[toIdx].id, secondHandle.endpoint)
-    );
-  }
+  applyLineArcGeometryToRoad(road, built.points);
   road.leftLaneCount = profile.leftLaneCount;
   road.rightLaneCount = profile.rightLaneCount;
   road.leftLaneWidth = profile.leftLaneWidth;
@@ -3327,18 +3376,7 @@ function rebuildConnectorRoadFromMeta(connectorRoad) {
   if (!built) return false;
   const profile = blendedConnectorProfile(roads.value[fromIdx], firstHandle.endpoint, roads.value[toIdx], secondHandle.endpoint);
   applyRoadShape(connectorRoad, built.points, { bezierSegments: built.bezierSegments });
-  const p0 = roadPoseAtEnd(roads.value[fromIdx], firstHandle.endpoint === 'start');
-  const p3 = roadPoseAtEnd(roads.value[toIdx], secondHandle.endpoint === 'start');
-  if (p0 && p3) {
-    const d0 = endpointDirection(firstHandle.endpoint, p0.hdg);
-    const d3 = endpointFinalDirection(secondHandle.endpoint, p3.hdg);
-    applySasGeometryToRoadSafe(
-      connectorRoad,
-      { x: p0.x, y: p0.y, hdg: Math.atan2(d0.y, d0.x) },
-      { x: p3.x, y: p3.y, hdg: Math.atan2(d3.y, d3.x) },
-      getConnectorSasTune(roads.value[fromIdx].id, firstHandle.endpoint, roads.value[toIdx].id, secondHandle.endpoint)
-    );
-  }
+  applyLineArcGeometryToRoad(connectorRoad, built.points);
   connectorRoad.leftLaneCount = profile.leftLaneCount;
   connectorRoad.rightLaneCount = profile.rightLaneCount;
   connectorRoad.leftLaneWidth = profile.leftLaneWidth;
@@ -3633,9 +3671,16 @@ function applySelectedRoad() {
   if (!r) return;
   const oldRoadId = String(r.id);
   const nextRoadId = String(roadForm.id).trim();
+  const oldRawRoadXml = rawRoadXmlById.value?.[oldRoadId] || '';
   detachImportedSource({
     roadIds: oldRoadId === nextRoadId ? [oldRoadId] : [oldRoadId, nextRoadId]
   });
+  if (oldRoadId !== nextRoadId && oldRawRoadXml) {
+    const nextRaw = { ...(rawRoadXmlById.value || {}) };
+    nextRaw[nextRoadId] = oldRawRoadXml;
+    delete nextRaw[oldRoadId];
+    rawRoadXmlById.value = nextRaw;
+  }
   r.id = String(roadForm.id).trim();
   r.junction = String(roadForm.junction).trim();
   r.leftLaneCount = Math.max(0, Number(roadForm.leftLaneCount || 0));
@@ -3648,6 +3693,7 @@ function applySelectedRoad() {
   r.leftLaneWidth = Math.max(0.5, Number(roadForm.leftLaneWidth || r.leftLaneWidth || 3.5));
   r.rightLaneWidth = Math.max(0.5, Number(roadForm.rightLaneWidth || r.rightLaneWidth || 3.5));
   r.laneWidth = (r.leftLaneWidth + r.rightLaneWidth) / 2;
+  applyRoadFormLaneLinks(r);
   const targetLength = Number(roadForm.length || r.length);
   const editPoints = getRoadEditPoints(r);
   if (Number.isFinite(targetLength) && targetLength > 0 && Math.abs(targetLength - r.length) > 1e-6) {
@@ -3797,10 +3843,12 @@ function currentSpec() {
   }, { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity });
   const hasBounds = Number.isFinite(bounds.minX) && Number.isFinite(bounds.maxX) && Number.isFinite(bounds.minY) && Number.isFinite(bounds.maxY);
   const roadsForExport = roads.value.map((r) => {
+    const roadId = String(r?.id ?? '').trim();
     return {
       ...r,
       length: polylineLength(r.points),
-      rawRoadXml: ''
+      rawRoadXml: rawRoadXmlById.value?.[roadId] || '',
+      patchRawRoadXml: Boolean(dirtyRoadIds.value?.[roadId])
     };
   });
   const junctions = junctionsForExport();

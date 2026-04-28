@@ -35,7 +35,7 @@
             <button type="button" @click="generateAndDownloadXodr">生成并下载XODR</button>
             <button type="button" @click="pickXodrFile">导入XODR</button>
             <button type="button" @click="pickBgFile">上传底图</button>
-            <button type="button" :disabled="!selectedRoad" @click="roadCodeDialogVisible = true">查看道路代码</button>
+            <button type="button" :disabled="!selectedRoad" @click="roadCodeDialogVisible = true">查看OpenDRIVE代码</button>
             <button type="button" @click="openRoadColorDialog">显示设置</button>
           </div>
         </section>
@@ -214,6 +214,11 @@
             </select>
           </label>
           <label>succ id<input v-model="roadForm.successorId" /></label>
+          <div style="grid-column: 1 / -1;" class="meta">lane links</div>
+          <template v-for="laneLink in roadForm.laneLinks" :key="laneLink.laneId">
+            <label>lane {{ laneLink.laneId }} pred<input v-model="laneLink.predecessor" /></label>
+            <label>lane {{ laneLink.laneId }} succ<input v-model="laneLink.successor" /></label>
+          </template>
           <div class="row" style="grid-column: 1 / -1; margin-top: 8px;">
             <button type="button" @click="applySelectedRoad">应用道路属性</button>
           </div>
@@ -289,7 +294,7 @@
     <div v-if="roadCodeDialogVisible" class="dialog-mask" @click.self="roadCodeDialogVisible = false">
       <div class="dialog">
         <div class="dialog-head">
-          <h3>Road {{ selectedRoad ? selectedRoad.id : '' }} 代码</h3>
+          <h3>Road {{ selectedRoad ? selectedRoad.id : '' }} OpenDRIVE</h3>
           <button type="button" class="dialog-close" @click="roadCodeDialogVisible = false">关闭</button>
         </div>
         <div class="dialog-raw road-code-panel" style="margin-top: 10px;">

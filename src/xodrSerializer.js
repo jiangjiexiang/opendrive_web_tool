@@ -344,11 +344,144 @@ function junctionXml(junction) {
   ].join('\n');
 }
 
-function roadXml(rawRoad, roadIndex) {
-  if (rawRoad && typeof rawRoad.rawRoadXml === 'string' && rawRoad.rawRoadXml.trim()) {
-    return rawRoad.rawRoadXml.trim();
+function readTagName(xml, ltIndex) {
+  const match = String(xml || '').slice(ltIndex).match(/^<\/?\s*([A-Za-z_][\w:.-]*)/);
+  return match ? match[1] : '';
+}
+
+function findTagEnd(xml, ltIndex) {
+  let quote = '';
+  for (let i = ltIndex + 1; i < xml.length; i += 1) {
+    const ch = xml[i];
+    if (quote) {
+      if (ch === quote) quote = '';
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+    } else if (ch === '>') {
+      return i;
+    }
   }
+  return -1;
+}
+
+function splitRoadXml(rawXml) {
+  const source = String(rawXml || '').trim();
+  const openStart = source.search(/<road\b/i);
+  const closeStart = source.lastIndexOf('</road>');
+  if (openStart < 0 || closeStart < 0) return null;
+  const openEnd = findTagEnd(source, openStart);
+  if (openEnd < 0 || openEnd >= closeStart) return null;
+  return {
+    openTag: source.slice(openStart, openEnd + 1),
+    inner: source.slice(openEnd + 1, closeStart),
+    closeTag: source.slice(closeStart, closeStart + '</road>'.length)
+  };
+}
+
+function topLevelXmlBlocks(innerXml) {
+  const blocks = [];
+  const xml = String(innerXml || '');
+  let i = 0;
+  while (i < xml.length) {
+    const start = xml.indexOf('<', i);
+    if (start < 0) break;
+    if (xml.startsWith('<!--', start)) {
+      const end = xml.indexOf('-->', start + 4);
+      if (end < 0) break;
+      blocks.push({ tag: '#comment', xml: xml.slice(start, end + 3) });
+      i = end + 3;
+      continue;
+    }
+    if (xml.startsWith('<![CDATA[', start)) {
+      const end = xml.indexOf(']]>', start + 9);
+      if (end < 0) break;
+      blocks.push({ tag: '#cdata', xml: xml.slice(start, end + 3) });
+      i = end + 3;
+      continue;
+    }
+    const tag = readTagName(xml, start);
+    if (!tag || xml[start + 1] === '/') {
+      i = start + 1;
+      continue;
+    }
+
+    let depth = 0;
+    let cursor = start;
+    let endOfBlock = -1;
+    while (cursor < xml.length) {
+      const lt = xml.indexOf('<', cursor);
+      if (lt < 0) break;
+      if (xml.startsWith('<!--', lt)) {
+        const commentEnd = xml.indexOf('-->', lt + 4);
+        if (commentEnd < 0) break;
+        cursor = commentEnd + 3;
+        continue;
+      }
+      if (xml.startsWith('<![CDATA[', lt)) {
+        const cdataEnd = xml.indexOf(']]>', lt + 9);
+        if (cdataEnd < 0) break;
+        cursor = cdataEnd + 3;
+        continue;
+      }
+      const gt = findTagEnd(xml, lt);
+      if (gt < 0) break;
+      const isClosing = xml[lt + 1] === '/';
+      const isSelfClosing = xml[gt - 1] === '/';
+      if (!isClosing) {
+        depth += 1;
+        if (isSelfClosing) depth -= 1;
+      } else {
+        depth -= 1;
+      }
+      cursor = gt + 1;
+      if (depth <= 0) {
+        endOfBlock = cursor;
+        break;
+      }
+    }
+    if (endOfBlock < 0) break;
+    blocks.push({ tag, xml: xml.slice(start, endOfBlock) });
+    i = endOfBlock;
+  }
+  return blocks;
+}
+
+function generatedRoadSections(generatedRoadXml) {
+  const split = splitRoadXml(generatedRoadXml);
+  if (!split) return null;
+  const sections = {};
+  topLevelXmlBlocks(split.inner).forEach((block) => {
+    if (!sections[block.tag]) sections[block.tag] = [];
+    sections[block.tag].push(block.xml.trim());
+  });
+  return { openTag: split.openTag, sections };
+}
+
+function patchRawRoadXml(rawRoadXml, generatedXml) {
+  const raw = splitRoadXml(rawRoadXml);
+  const generated = generatedRoadSections(generatedXml);
+  if (!raw || !generated) return generatedXml;
+  const managedTags = new Set(['link', 'type', 'planView', 'elevationProfile', 'lateralProfile', 'lanes']);
+  const unknownBlocks = topLevelXmlBlocks(raw.inner)
+    .filter((block) => !managedTags.has(block.tag))
+    .map((block) => block.xml.trim())
+    .filter(Boolean);
+  const managedBlocks = ['link', 'type', 'planView', 'elevationProfile', 'lateralProfile', 'lanes']
+    .flatMap((tag) => generated.sections[tag] || []);
+  return [
+    generated.openTag,
+    ...managedBlocks.map((block) => block.replace(/^/gm, '  ')),
+    ...unknownBlocks.map((block) => block.replace(/^/gm, '  ')),
+    '  </road>'
+  ].join('\n');
+}
+
+function generatedRoadXml(rawRoad, roadIndex) {
   const road = { ...rawRoad };
+  delete road.rawRoadXml;
+  delete road.patchRawRoadXml;
   const sourceGeometry = Array.isArray(road.geometry) && road.geometry.length
     ? road.geometry
     : buildGeometryFromPoints(road.points);
@@ -440,6 +573,18 @@ function roadXml(rawRoad, roadIndex) {
   ].join('\n');
 }
 
+function roadXml(rawRoad, roadIndex) {
+  const rawRoadXml = String(rawRoad?.rawRoadXml || '').trim();
+  if (rawRoadXml && !rawRoad?.patchRawRoadXml) {
+    return rawRoadXml;
+  }
+  const generated = generatedRoadXml(rawRoad, roadIndex);
+  if (rawRoadXml && rawRoad?.patchRawRoadXml) {
+    return patchRawRoadXml(rawRoadXml, generated);
+  }
+  return generated;
+}
+
 function buildXodr(spec) {
   const header = spec.header || {};
   const roads = Array.isArray(spec.roads) ? spec.roads : [];
@@ -465,11 +610,12 @@ function buildXodr(spec) {
   const east = hasBounds ? bounds.maxX : Number(header.east || 0);
   const west = hasBounds ? bounds.minX : Number(header.west || 0);
 
-  const headerXml = [
+  const rawHeaderXml = String(header.rawHeaderXml || '').trim();
+  const headerXml = rawHeaderXml || [
     `  <header revMajor="1" revMinor="4" name="${esc(header.name || 'web_editor_map')}" version="1" date="${esc(header.date || new Date().toISOString())}" north="${north}" south="${south}" east="${east}" west="${west}" >`,
     '    <geoReference><![CDATA[]]></geoReference>',
     '    <userData>',
-      '      <vectorScene program="web_editor_map"/>',
+    '      <vectorScene program="web_editor_map"/>',
     '    </userData>',
     '  </header>'
   ].join('\n');
