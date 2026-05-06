@@ -1,1 +1,0 @@
-/usr/bin/c++     CMakeFiles/odr_json_parser.dir/odr_json_parser.cpp.o  -o ../bin/odr_json_parser  libOpenDRIVE/libOpenDrive.a _deps/pugixml-build/libpugixml.a 

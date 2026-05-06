@@ -1,3 +1,0 @@
-/home/jiang/workspace/opendrive_web_tool/native/build/_deps/pugixml-subbuild/CMakeFiles/rebuild_cache.dir
-/home/jiang/workspace/opendrive_web_tool/native/build/_deps/pugixml-subbuild/CMakeFiles/edit_cache.dir
-/home/jiang/workspace/opendrive_web_tool/native/build/_deps/pugixml-subbuild/CMakeFiles/pugixml-populate.dir
