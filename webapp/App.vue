@@ -1,12 +1,6 @@
 <template>
   <main class="layout">
     <header class="topbar">
-      <div class="brand-block">
-        <p class="eyebrow">OpenDRIVE Map Console</p>
-        <div class="brand-row">
-          <h1>OpenDRIVE 编辑器</h1>
-        </div>
-      </div>
       <div class="toolbar-strip">
         <section class="tool-cluster">
           <span class="cluster-label">模式</span>
@@ -33,7 +27,9 @@
           <div class="toolbar-group">
             <button type="button" @click="runValidate">质检</button>
             <button type="button" @click="generateAndDownloadXodr">生成并下载XODR</button>
-            <button type="button" @click="pickXodrFile">导入XODR</button>
+            <button type="button" :disabled="importStatus.loading" @click="pickXodrFile">
+              {{ importStatus.loading ? '导入中...' : '导入XODR' }}
+            </button>
             <button type="button" @click="pickBgFile">上传底图</button>
             <button type="button" :disabled="!selectedRoad" @click="roadCodeDialogVisible = true">查看OpenDRIVE代码</button>
             <button type="button" @click="openRoadColorDialog">显示设置</button>
@@ -68,6 +64,9 @@
         </div>
         <div class="road-search-wrap">
           <input v-model="roadSearchQuery" type="search" placeholder="搜索 road id" class="road-search-input" />
+        </div>
+        <div v-if="importStatus.message" class="import-status" :class="importStatus.type">
+          {{ importStatus.message }}
         </div>
         <div ref="roadListEl" class="road-list road-list-fill" @scroll="handleRoadListScroll">
           <template v-if="useVirtualRoadList">
@@ -404,6 +403,7 @@ const {
   generateAndDownloadXodr,
   pickXodrFile,
   pickBgFile,
+  importStatus,
   openRoadColorDialog,
   roads,
   selectedRoadIndex,

@@ -1,3 +1,8 @@
 /GESMHY.xodr
 node_modules/
 dist/
+build/
+native/build/
+native/bin/
+.DS_Store
+**/.DS_Store

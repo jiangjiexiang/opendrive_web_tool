@@ -72,6 +72,11 @@ const rawOpenDriveExtras = ref([]);
 const dirtyRoadIds = ref({});
 const dirtyJunctionIds = ref({});
 const headerDirty = ref(false);
+const importStatus = reactive({
+  loading: false,
+  message: '',
+  type: ''
+});
 const suppressDetach = ref(false);
 const endpointDrag = ref(null);
 const suppressNextClick = ref(false);
@@ -593,6 +598,16 @@ function postJson(url, payload) {
   });
 }
 
+function formatErrorMessage(error) {
+  const raw = String(error?.message || error || '').trim();
+  if (!raw) return '未知错误';
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed?.error) return String(parsed.error);
+  } catch (_) {}
+  return raw;
+}
+
 function polylineLength(points) {
   let total = 0;
   for (let i = 1; i < points.length; i += 1) {
@@ -763,17 +778,21 @@ function pickRoad(worldPoint) {
     }
     const centerLine = renderData?.centerRef?.length > 1 ? renderData.centerRef : r.points;
     const centerDist = distPointToPolyline(worldPoint, centerLine);
-    const leftLaneCount = Math.max(0, Number(r.leftLaneCount || 0));
-    const rightLaneCount = Math.max(0, Number(r.rightLaneCount || 0));
-    const leftLaneWidth = Math.max(0.5, Number(r.leftLaneWidth || r.laneWidth || 3.5));
-    const rightLaneWidth = Math.max(0.5, Number(r.rightLaneWidth || r.laneWidth || 3.5));
-    const halfWidth = Math.max(1.8, leftLaneCount * leftLaneWidth * 0.5 + rightLaneCount * rightLaneWidth * 0.5);
+    const firstProfile = getRoadProfileAtS(r, Number(r.points?.[0]?.s || 0));
+    const lastProfile = getRoadProfileAtS(r, Number(r.points?.[r.points.length - 1]?.s || r.length || 0));
+    const halfWidth = Math.max(
+      1.8,
+      Math.abs(firstProfile.leftBoundary - firstProfile.laneOffset),
+      Math.abs(firstProfile.rightBoundary - firstProfile.laneOffset),
+      Math.abs(lastProfile.leftBoundary - lastProfile.laneOffset),
+      Math.abs(lastProfile.rightBoundary - lastProfile.laneOffset)
+    );
     const clickPadding = 14 / Math.max(0.1, view.scale);
     let score = centerDist - (halfWidth + clickPadding);
 
     const leftPath = renderData?.leftBoundary || [];
     const rightPath = renderData?.rightBoundary || [];
-    if (leftPath.length > 2 && rightPath.length > 2) {
+    if (leftPath.length >= 2 && rightPath.length >= 2) {
       const bandPolygon = leftPath.concat([...rightPath].reverse());
       if (isPointInPolygon(worldPoint, bandPolygon)) {
         score = -2;
@@ -4017,6 +4036,8 @@ function applyNativeRoads(parsedRoads, importedJunctions = [], importedRoadDetai
 }
 
 function pickXodrFile() {
+  importStatus.message = '';
+  importStatus.type = '';
   xodrFileInput.value?.click();
 }
 
@@ -4031,6 +4052,9 @@ function pickBgFile() {
 async function importXodr() {
   const file = xodrFileInput.value?.files?.[0];
   if (!file) return;
+  importStatus.loading = true;
+  importStatus.message = `正在导入 ${file.name || 'XODR 文件'}...`;
+  importStatus.type = 'loading';
   try {
     const text = await file.text();
     suppressDetach.value = true;
@@ -4056,8 +4080,17 @@ async function importXodr() {
     applyNativeRoads(payload.roads || [], parsedJunctions, details);
     importedXodrText.value = text;
     lastXodr.value = '';
+    const roadCount = Array.isArray(payload.roads) ? payload.roads.length : roads.value.length;
+    importStatus.message = `已导入 ${roadCount} 条道路`;
+    importStatus.type = 'ok';
+  } catch (error) {
+    const message = formatErrorMessage(error);
+    importStatus.message = `导入失败：${message}`;
+    importStatus.type = 'error';
+    window.alert(importStatus.message);
   } finally {
     suppressDetach.value = false;
+    importStatus.loading = false;
     xodrFileInput.value.value = '';
   }
 }
@@ -4299,21 +4332,16 @@ function isEditableElement(target) {
 
 function handleKeyDown(e) {
   if (!isEditableElement(e.target) && e.key === 'Escape') {
-    if (mode.value === 'measure') {
-      e.preventDefault();
-      measurePoints.value = [];
-      measureHoverPoint.value = null;
-      mode.value = 'select';
-      render();
-      return;
-    }
-    if (mode.value === 'draw' && drawingPoints.value.length > 0) {
-      e.preventDefault();
-      drawingPoints.value = [];
-      mode.value = 'select';
-      render();
-      return;
-    }
+    e.preventDefault();
+    setMode('select');
+    render();
+    return;
+  }
+  if (!isEditableElement(e.target) && e.key === 'q') {
+    e.preventDefault();
+    setMode('draw');
+    render();
+    return;
   }
   if (!isEditableElement(e.target) && e.key === 'Enter') {
     if (mode.value === 'draw' && drawingPoints.value.length >= 2) {
@@ -4424,6 +4452,7 @@ onBeforeUnmount(() => {
     generateAndDownloadXodr,
     pickXodrFile,
     pickBgFile,
+    importStatus,
     openRoadColorDialog,
     roads,
     selectedRoadIndex,
