@@ -99,16 +99,42 @@ function geometryXml(road) {
   }).join('\n');
 }
 
-function widthXml(records, fallbackWidth) {
+function relativeWidthRecord(record, sectionS) {
+  const s0 = num(sectionS, 0);
+  const sOffset = num(record?.sOffset, 0);
+  if (s0 <= 0 || sOffset < s0 - 1e-6) {
+    return {
+      sOffset,
+      a: num(record?.a, 0),
+      b: num(record?.b, 0),
+      c: num(record?.c, 0),
+      d: num(record?.d, 0)
+    };
+  }
+  const a = num(record?.a, 0);
+  const b = num(record?.b, 0);
+  const c = num(record?.c, 0);
+  const d = num(record?.d, 0);
+  return {
+    sOffset: Math.max(0, sOffset - s0),
+    a: a + b * s0 + c * s0 * s0 + d * s0 * s0 * s0,
+    b: b + 2 * c * s0 + 3 * d * s0 * s0,
+    c: c + 3 * d * s0,
+    d
+  };
+}
+
+function widthXml(records, fallbackWidth, sectionS = 0) {
   if (Array.isArray(records) && records.length) {
-    return records.map((record) => (
-      `            <width sOffset="${num(record?.sOffset, 0).toFixed(3)}" a="${num(record?.a, fallbackWidth).toFixed(3)}" b="${num(record?.b, 0).toFixed(6)}" c="${num(record?.c, 0).toFixed(6)}" d="${num(record?.d, 0).toFixed(6)}"/>`
-    )).join('\n');
+    return records.map((record) => {
+      const rel = relativeWidthRecord(record, sectionS);
+      return `            <width sOffset="${num(rel.sOffset, 0).toFixed(3)}" a="${num(rel.a, fallbackWidth).toFixed(3)}" b="${num(rel.b, 0).toFixed(6)}" c="${num(rel.c, 0).toFixed(6)}" d="${num(rel.d, 0).toFixed(6)}"/>`;
+    }).join('\n');
   }
   return `            <width sOffset="0.000" a="${num(fallbackWidth, 3.5).toFixed(3)}" b="0.000000" c="0.000000" d="0.000000"/>`;
 }
 
-function laneXml(id, type, widthRecords, fallbackWidth, linkSpec = null) {
+function laneXml(id, type, widthRecords, fallbackWidth, linkSpec = null, sectionS = 0) {
   const linkLines = [];
   if (linkSpec && (linkSpec.predecessor !== undefined || linkSpec.successor !== undefined)) {
     linkLines.push('            <link>');
@@ -123,7 +149,7 @@ function laneXml(id, type, widthRecords, fallbackWidth, linkSpec = null) {
   return [
     `          <lane id="${esc(id)}" type="${esc(type || 'driving')}" level="false">`,
     ...linkLines,
-    Number(id) === 0 ? '' : widthXml(widthRecords, fallbackWidth),
+    Number(id) === 0 ? '' : widthXml(widthRecords, fallbackWidth, sectionS),
     Number(id) === 0 ? '' : '            <roadMark sOffset="0" type="solid" weight="standard" color="standard" width="0.15"/>',
     '          </lane>'
   ].filter(Boolean).join('\n');
@@ -137,19 +163,20 @@ function laneSectionXml(section, road) {
     ? section.rightLanes
     : Array.from({ length: Math.max(0, Number(section?.rightLaneCount ?? road?.rightLaneCount ?? 0)) }, (_, i) => ({ id: -(i + 1), type: 'driving' }));
   const laneLinks = section?.laneLinks || {};
+  const sectionS = num(section?.s, 0);
   const leftWidth = num(section?.leftLaneWidth ?? road?.leftLaneWidth ?? road?.laneWidth, 3.5);
   const rightWidth = num(section?.rightLaneWidth ?? road?.rightLaneWidth ?? road?.laneWidth, 3.5);
   const singleSide = (leftLanes.length === 0) !== (rightLanes.length === 0);
   return [
     `      <laneSection s="${num(section?.s, 0).toFixed(3)}" singleSide="${singleSide ? 'true' : 'false'}">`,
     '        <left>',
-    leftLanes.map((lane) => laneXml(lane.id, lane.type || 'driving', section?.leftWidthRecords || road?.leftWidthRecords, leftWidth, laneLinks[lane.id])).join('\n'),
+    leftLanes.map((lane) => laneXml(lane.id, lane.type || 'driving', lane.widthProfile || section?.leftWidthRecords || road?.leftWidthRecords, leftWidth, laneLinks[lane.id], sectionS)).join('\n'),
     '        </left>',
     '        <center>',
-    laneXml(0, section?.centerType === 'none' ? 'none' : (section?.centerType || road?.centerType || 'none'), null, 0, laneLinks[0]),
+    laneXml(0, section?.centerType === 'none' ? 'none' : (section?.centerType || road?.centerType || 'none'), null, 0, laneLinks[0], sectionS),
     '        </center>',
     '        <right>',
-    rightLanes.map((lane) => laneXml(lane.id, lane.type || 'driving', section?.rightWidthRecords || road?.rightWidthRecords, rightWidth, laneLinks[lane.id])).join('\n'),
+    rightLanes.map((lane) => laneXml(lane.id, lane.type || 'driving', lane.widthProfile || section?.rightWidthRecords || road?.rightWidthRecords, rightWidth, laneLinks[lane.id], sectionS)).join('\n'),
     '        </right>',
     '      </laneSection>'
   ].join('\n');

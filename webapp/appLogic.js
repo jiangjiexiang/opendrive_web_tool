@@ -119,7 +119,8 @@ const drawForm = reactive({
 const junctionForm = reactive({
   edgePadding: 6,
   smoothness: 0.34,
-  transitionLength: 16
+  transitionLength: 16,
+  debugEndpointLines: false
 });
 const junctionUi = reactive({
   generating: false,
@@ -1921,21 +1922,59 @@ function clearNativeGeometry(road) {
   road.nativeLaneBoundaries = null;
 }
 
+function poseAtGeometryEnd(geometry) {
+  const list = Array.isArray(geometry) ? geometry.filter((g) => Number(g?.length || 0) > 1e-8) : [];
+  if (!list.length) return null;
+  const g = list[list.length - 1];
+  const len = Number(g.length || 0);
+  const p0 = { x: Number(g.x || 0), y: Number(g.y || 0), hdg: Number(g.hdg || 0) };
+  const type = String(g.type || 'line').toLowerCase();
+  if (type === 'arc') {
+    const k = Number(g.curvature || 0);
+    if (Math.abs(k) > 1e-10) {
+      const r = 1 / k;
+      const cx = p0.x - Math.sin(p0.hdg) * r;
+      const cy = p0.y + Math.cos(p0.hdg) * r;
+      const hdg = p0.hdg + k * len;
+      return { x: cx + Math.sin(hdg) * r, y: cy - Math.cos(hdg) * r, hdg };
+    }
+  } else if (type === 'spiral') {
+    return integrateCurvatureSegment(p0, Number(g.curvStart || 0), Number(g.curvEnd || 0), len, Math.max(12, Math.ceil(len / 0.15)));
+  }
+  return {
+    x: p0.x + Math.cos(p0.hdg) * len,
+    y: p0.y + Math.sin(p0.hdg) * len,
+    hdg: p0.hdg
+  };
+}
+
 function roadPoseAtEnd(road, atStart) {
+  const geometry = Array.isArray(road?.geometry) ? road.geometry.filter((g) => Number(g?.length || 0) > 1e-8) : [];
+  if (geometry.length) {
+    if (atStart) {
+      const first = geometry[0];
+      const pose = {
+        x: Number(first.x),
+        y: Number(first.y),
+        hdg: Number(first.hdg)
+      };
+      if ([pose.x, pose.y, pose.hdg].every(Number.isFinite)) return pose;
+    } else {
+      const pose = poseAtGeometryEnd(geometry);
+      if (pose && [pose.x, pose.y, pose.hdg].every(Number.isFinite)) return pose;
+    }
+  }
   const pts = road.points || [];
   if (pts.length < 2) return null;
   const idx = atStart ? 0 : pts.length - 1;
   const p = pts[idx];
-  let hdg;
-  if (atStart) {
+  let hdg = Number(p.hdg);
+  if (!Number.isFinite(hdg) && atStart) {
     const p1 = pts[1];
     hdg = Math.atan2(p1.y - p.y, p1.x - p.x);
-  } else {
+  } else if (!Number.isFinite(hdg)) {
     const p0 = pts[pts.length - 2];
     hdg = Math.atan2(p.y - p0.y, p.x - p0.x);
-  }
-  if (!Number.isFinite(hdg)) {
-    hdg = Number(p.hdg);
   }
   if (!Number.isFinite(hdg)) {
     hdg = 0;
@@ -2418,6 +2457,165 @@ function wrapAngleRad(angle) {
   return out;
 }
 
+function lineIntersectionFromPointsAndDirs(p0, d0, p1, d1) {
+  const det = d0.x * d1.y - d0.y * d1.x;
+  if (Math.abs(det) < 1e-8) return null;
+  const dx = p1.x - p0.x;
+  const dy = p1.y - p0.y;
+  return {
+    t0: (dx * d1.y - dy * d1.x) / det,
+    t1: (dx * d0.y - dy * d0.x) / det
+  };
+}
+
+function buildLineArcLineGeometryFromPoses(startPose, endPose, options = {}) {
+  const x0 = Number(startPose?.x);
+  const y0 = Number(startPose?.y);
+  const h0 = Number(startPose?.hdg);
+  const x3 = Number(endPose?.x);
+  const y3 = Number(endPose?.y);
+  const h3 = Number(endPose?.hdg);
+  if (![x0, y0, h0, x3, y3, h3].every(Number.isFinite)) return null;
+  const p0 = { x: x0, y: y0 };
+  const p3 = { x: x3, y: y3 };
+  const d0 = normalizeVec({ x: Math.cos(h0), y: Math.sin(h0) });
+  const d3 = normalizeVec({ x: Math.cos(h3), y: Math.sin(h3) });
+  const directDist = Math.hypot(x3 - x0, y3 - y0);
+  if (directDist < 0.15) return null;
+
+  const delta = wrapAngleRad(h3 - h0);
+  if (Math.abs(delta) < 0.01) {
+    const projected = vecDot(vecSub(p3, p0), d0);
+    if (projected <= 0.05) return null;
+    return {
+      geometry: [{
+        s: 0,
+        x: x0,
+        y: y0,
+        hdg: h0,
+        length: Number(projected.toFixed(6)),
+        type: 'line'
+      }],
+      length: Number(projected.toFixed(6))
+    };
+  }
+
+  const turnSign = delta >= 0 ? 1 : -1;
+  const inDirAtEnd = vecScale(d3, -1);
+  const hit = lineIntersectionFromPointsAndDirs(p0, d0, p3, inDirAtEnd);
+  if (!hit || hit.t0 <= 0.05 || hit.t1 <= 0.05) return null;
+
+  const halfTurn = Math.abs(delta) * 0.5;
+  const tanHalf = Math.tan(halfTurn);
+  if (!Number.isFinite(tanHalf) || Math.abs(tanHalf) < 1e-6) return null;
+  const targetLine = clamp(directDist * 0.045, 0.45, 1.2);
+  const minLine = Math.min(targetLine, Math.max(0.05, Math.min(hit.t0, hit.t1) * 0.35));
+  const maxTangent = Math.min(hit.t0 - minLine, hit.t1 - minLine);
+  if (maxTangent <= 0.05) return null;
+
+  const tangentForTargetLine = Math.min(hit.t0 - targetLine, hit.t1 - targetLine);
+  const preferredRadius = Math.max(Number(options.minRadius || 0), 1.0);
+  const radiusTangent = preferredRadius * Math.abs(tanHalf);
+  const tangent = clamp(
+    Math.max(radiusTangent, tangentForTargetLine),
+    0.05,
+    maxTangent
+  );
+  const radius = tangent / Math.abs(tanHalf);
+  if (!Number.isFinite(radius) || radius < 0.2) return null;
+
+  const line1Length = hit.t0 - tangent;
+  const line2Length = hit.t1 - tangent;
+  const arcStart = vecAdd(p0, vecScale(d0, line1Length));
+  const arcEnd = vecAdd(p3, vecScale(inDirAtEnd, line2Length));
+  const arcLength = radius * Math.abs(delta);
+  if (line1Length <= 0.05 || line2Length <= 0.05 || arcLength <= 0.05) return null;
+
+  const hArcEnd = h0 + delta;
+  const geometry = [
+    {
+      s: 0,
+      x: x0,
+      y: y0,
+      hdg: h0,
+      length: Number(line1Length.toFixed(6)),
+      type: 'line'
+    },
+    {
+      s: Number(line1Length.toFixed(6)),
+      x: arcStart.x,
+      y: arcStart.y,
+      hdg: h0,
+      length: Number(arcLength.toFixed(6)),
+      type: 'arc',
+      curvature: turnSign / radius
+    },
+    {
+      s: Number((line1Length + arcLength).toFixed(6)),
+      x: arcEnd.x,
+      y: arcEnd.y,
+      hdg: hArcEnd,
+      length: Number(line2Length.toFixed(6)),
+      type: 'line'
+    }
+  ];
+  const length = geometry.reduce((acc, g) => acc + Number(g.length || 0), 0);
+  return { geometry, length: Number(length.toFixed(6)) };
+}
+
+function buildStubbedConnectorGeometryFromPoses(startPose, endPose) {
+  const x0 = Number(startPose?.x);
+  const y0 = Number(startPose?.y);
+  const h0 = Number(startPose?.hdg);
+  const x3 = Number(endPose?.x);
+  const y3 = Number(endPose?.y);
+  const h3 = Number(endPose?.hdg);
+  if (![x0, y0, h0, x3, y3, h3].every(Number.isFinite)) return null;
+  const directDist = Math.hypot(x3 - x0, y3 - y0);
+  if (directDist < 0.15) return null;
+  const stubLength = clamp(directDist * 0.045, 0.45, 1.2);
+  const d0 = { x: Math.cos(h0), y: Math.sin(h0) };
+  const d3 = { x: Math.cos(h3), y: Math.sin(h3) };
+  const startLineEnd = { x: x0 + d0.x * stubLength, y: y0 + d0.y * stubLength };
+  const endLineStart = { x: x3 - d3.x * stubLength, y: y3 - d3.y * stubLength };
+  const middleLength = Math.hypot(endLineStart.x - startLineEnd.x, endLineStart.y - startLineEnd.y);
+  const geometry = [];
+  let s = 0;
+  geometry.push({
+    s,
+    x: x0,
+    y: y0,
+    hdg: h0,
+    length: Number(stubLength.toFixed(6)),
+    type: 'line'
+  });
+  s += stubLength;
+  if (middleLength > 0.05) {
+    geometry.push({
+      s: Number(s.toFixed(6)),
+      x: startLineEnd.x,
+      y: startLineEnd.y,
+      hdg: Math.atan2(endLineStart.y - startLineEnd.y, endLineStart.x - startLineEnd.x),
+      length: Number(middleLength.toFixed(6)),
+      type: 'line'
+    });
+    s += middleLength;
+  }
+  geometry.push({
+    s: Number(s.toFixed(6)),
+    x: endLineStart.x,
+    y: endLineStart.y,
+    hdg: h3,
+    length: Number(stubLength.toFixed(6)),
+    type: 'line'
+  });
+  s += stubLength;
+  return {
+    geometry,
+    length: Number(s.toFixed(6))
+  };
+}
+
 function connectorTuneKey(fromRoadId, fromEndpoint, toRoadId, toEndpoint) {
   return `${String(fromRoadId)}:${String(fromEndpoint)}->${String(toRoadId)}:${String(toEndpoint)}`;
 }
@@ -2630,43 +2828,12 @@ function applySasGeometryToRoadSafe(road, startPose, endPose, options = {}) {
 }
 
 function buildLineArcLineGeometryBetweenPoses(startPose, endPose) {
-  const sas = buildSasGeometryBetweenPoses(startPose, endPose);
-  if (!sas || !Array.isArray(sas.geometry) || sas.geometry.length < 3) return null;
-  const g0 = sas.geometry[0];
-  const g1 = sas.geometry[1];
-  const g2 = sas.geometry[2];
-  const geometry = [
-    {
-      s: 0,
-      x: Number(g0.x || 0),
-      y: Number(g0.y || 0),
-      hdg: Number(g0.hdg || 0),
-      length: Number(g0.length || 0),
-      type: 'line'
-    },
-    {
-      s: Number(g0.length || 0),
-      x: Number(g1.x || 0),
-      y: Number(g1.y || 0),
-      hdg: Number(g1.hdg || 0),
-      length: Number(g1.length || 0),
-      type: 'arc',
-      curvature: Number(g1.curvature || 0)
-    },
-    {
-      s: Number((Number(g0.length || 0) + Number(g1.length || 0)).toFixed(6)),
-      x: Number(g2.x || 0),
-      y: Number(g2.y || 0),
-      hdg: Number(g2.hdg || 0),
-      length: Number(g2.length || 0),
-      type: 'line'
-    }
-  ];
-  const total = geometry.reduce((acc, g) => acc + Number(g.length || 0), 0);
-  return {
-    geometry,
-    length: Number(total.toFixed(6))
-  };
+  if (junctionForm.debugEndpointLines) {
+    return buildStubbedConnectorGeometryFromPoses(startPose, endPose);
+  }
+  const lalExact = buildLineArcLineGeometryFromPoses(startPose, endPose);
+  if (lalExact) return lalExact;
+  return buildStubbedConnectorGeometryFromPoses(startPose, endPose);
 }
 
 function applyConnectorGeometryToRoad(road, startPose, endPose) {
@@ -2674,6 +2841,12 @@ function applyConnectorGeometryToRoad(road, startPose, endPose) {
   if (!lal) return false;
   road.geometry = lal.geometry;
   road.length = lal.length;
+  const sampled = sampleGeometryToPoints(lal.geometry, 0.45);
+  if (sampled.length >= 2) {
+    road.points = sampled;
+    road.editPoints = [sampled[0], sampled[sampled.length - 1]];
+  }
+  clearNativeGeometry(road);
   return true;
 }
 
@@ -2977,7 +3150,6 @@ function generateJunctionFromHandles(handles) {
 
   for (const primary of directedFlows) {
     if (!primary) continue;
-    const reverse = null;
 
     const primarySideLeft = approachRoleIsLeft(primary.from, primary.fromProfile.roleUsed);
     const buildSideSpec = (flow, sideLeft) => {
@@ -3003,12 +3175,8 @@ function generateJunctionFromHandles(handles) {
       };
     };
 
-    const leftSpec = primarySideLeft
-      ? buildSideSpec(primary, true)
-      : buildSideSpec(reverse, true);
-    const rightSpec = primarySideLeft
-      ? buildSideSpec(reverse, false)
-      : buildSideSpec(primary, false);
+    const leftSpec = primarySideLeft ? buildSideSpec(primary, true) : null;
+    const rightSpec = primarySideLeft ? null : buildSideSpec(primary, false);
 
     const connectorRoad = createRoadFromPoints(
       primary.centerline.points,
@@ -3018,7 +3186,18 @@ function generateJunctionFromHandles(handles) {
         smoothing: junctionForm.smoothness
       }
     );
-    const lineArcApplied = applyLineArcGeometryToRoad(connectorRoad, primary.centerline.points);
+    const startPose = {
+      x: primary.from.boundary.x,
+      y: primary.from.boundary.y,
+      hdg: Math.atan2(primary.from.incomingDir.y, primary.from.incomingDir.x)
+    };
+    const endDir = endpointFinalDirection(primary.to.handle.endpoint, primary.to.pose.hdg);
+    const endPose = {
+      x: primary.to.boundary.x,
+      y: primary.to.boundary.y,
+      hdg: Math.atan2(endDir.y, endDir.x)
+    };
+    const lineArcApplied = applyConnectorGeometryToRoad(connectorRoad, startPose, endPose);
     if (!lineArcApplied) {
       return {
         ok: false,
@@ -3129,7 +3308,7 @@ function generateJunctionFromHandles(handles) {
         roadId: String(connectorRoad.id),
         fromRoadId: String(spec.flow.from.road.id),
         toRoadId: String(spec.flow.to.road.id),
-        entryContactPoint: spec.sideLeft ? 'end' : 'start',
+        entryContactPoint: 'start',
         transition: spec.transitionType,
         fromRoleUsed: spec.links.fromRoleUsed,
         toRoleUsed: spec.links.toRoleUsed,
@@ -3283,6 +3462,31 @@ function blendedConnectorProfile(firstRoad, firstEndpoint, secondRoad, secondEnd
   };
 }
 
+function connectorPosesFromHandles(firstHandle, secondHandle) {
+  const firstRoad = roads.value[firstHandle?.roadIdx];
+  const secondRoad = roads.value[secondHandle?.roadIdx];
+  if (!firstRoad || !secondRoad) return null;
+  const p0 = roadPoseAtEnd(firstRoad, firstHandle.endpoint === 'start');
+  const p3 = roadPoseAtEnd(secondRoad, secondHandle.endpoint === 'start');
+  if (!p0 || !p3) return null;
+  const startDir = endpointDirection(firstHandle.endpoint, p0.hdg);
+  const endDir = endpointFinalDirection(secondHandle.endpoint, p3.hdg);
+  return {
+    startPose: {
+      x: p0.x,
+      y: p0.y,
+      hdg: Math.atan2(startDir.y, startDir.x)
+    },
+    endPose: {
+      x: p3.x,
+      y: p3.y,
+      hdg: Math.atan2(endDir.y, endDir.x)
+    },
+    firstRoad,
+    secondRoad
+  };
+}
+
 function connectRoadsWithBezier(firstHandle, secondHandle, smoothness) {
   if (!firstHandle || !secondHandle) return false;
   if (firstHandle.roadIdx === secondHandle.roadIdx) return false;
@@ -3306,8 +3510,14 @@ function connectRoadsWithBezier(firstHandle, secondHandle, smoothness) {
     ? roads.value[existingIdx]
     : createRoadFromPoints(points, {}, { bezierSegments });
   const profile = blendedConnectorProfile(firstRoad, firstHandle.endpoint, secondRoad, secondHandle.endpoint);
-  applyRoadShape(targetRoad, points, { bezierSegments });
-  applyLineArcGeometryToRoad(targetRoad, points);
+  const poses = connectorPosesFromHandles(firstHandle, secondHandle);
+  const connectorApplied = poses
+    ? applyConnectorGeometryToRoad(targetRoad, poses.startPose, poses.endPose)
+    : false;
+  if (!connectorApplied) {
+    applyRoadShape(targetRoad, points, { bezierSegments });
+    applyLineArcGeometryToRoad(targetRoad, points);
+  }
   targetRoad.leftLaneCount = profile.leftLaneCount;
   targetRoad.rightLaneCount = profile.rightLaneCount;
   targetRoad.leftLaneWidth = profile.leftLaneWidth;
@@ -3366,8 +3576,14 @@ function rebuildSelectedConnector() {
   const built = buildBezierBetweenHandles(firstHandle, secondHandle, connectForm.smoothness, connectForm.overlap);
   if (!built) return;
   const profile = blendedConnectorProfile(roads.value[fromIdx], firstHandle.endpoint, roads.value[toIdx], secondHandle.endpoint);
-  applyRoadShape(road, built.points, { bezierSegments: built.bezierSegments });
-  applyLineArcGeometryToRoad(road, built.points);
+  const poses = connectorPosesFromHandles(firstHandle, secondHandle);
+  const connectorApplied = poses
+    ? applyConnectorGeometryToRoad(road, poses.startPose, poses.endPose)
+    : false;
+  if (!connectorApplied) {
+    applyRoadShape(road, built.points, { bezierSegments: built.bezierSegments });
+    applyLineArcGeometryToRoad(road, built.points);
+  }
   road.leftLaneCount = profile.leftLaneCount;
   road.rightLaneCount = profile.rightLaneCount;
   road.leftLaneWidth = profile.leftLaneWidth;
@@ -3394,8 +3610,14 @@ function rebuildConnectorRoadFromMeta(connectorRoad) {
   const built = buildBezierBetweenHandles(firstHandle, secondHandle, smoothness, overlap);
   if (!built) return false;
   const profile = blendedConnectorProfile(roads.value[fromIdx], firstHandle.endpoint, roads.value[toIdx], secondHandle.endpoint);
-  applyRoadShape(connectorRoad, built.points, { bezierSegments: built.bezierSegments });
-  applyLineArcGeometryToRoad(connectorRoad, built.points);
+  const poses = connectorPosesFromHandles(firstHandle, secondHandle);
+  const connectorApplied = poses
+    ? applyConnectorGeometryToRoad(connectorRoad, poses.startPose, poses.endPose)
+    : false;
+  if (!connectorApplied) {
+    applyRoadShape(connectorRoad, built.points, { bezierSegments: built.bezierSegments });
+    applyLineArcGeometryToRoad(connectorRoad, built.points);
+  }
   connectorRoad.leftLaneCount = profile.leftLaneCount;
   connectorRoad.rightLaneCount = profile.rightLaneCount;
   connectorRoad.leftLaneWidth = profile.leftLaneWidth;

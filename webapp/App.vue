@@ -1,5 +1,5 @@
 <template>
-  <main class="layout">
+  <main class="layout" :class="{ 'left-collapsed': leftPanelCollapsed, 'right-collapsed': rightPanelCollapsed }">
     <header class="topbar">
       <div class="toolbar-strip">
         <section class="tool-cluster">
@@ -53,9 +53,12 @@
     </header>
 
     <aside class="sidebar left-rail">
-      <div class="rail-header">
-        <p class="eyebrow">Road Index</p>
-        <h2 class="rail-title">道路列表</h2>
+      <div class="rail-header rail-header-row">
+        <div>
+          <p class="eyebrow">Road Index</p>
+          <h2 class="rail-title">道路列表</h2>
+        </div>
+        <button type="button" class="rail-toggle-btn" @click="toggleLeftPanel">收起</button>
       </div>
       <section class="panel road-panel">
         <div class="panel-heading">
@@ -168,6 +171,13 @@
     </section>
 
     <aside class="sidebar right-rail">
+      <div class="rail-header rail-header-row">
+        <div>
+          <p class="eyebrow">Inspector</p>
+          <h2 class="rail-title">属性面板</h2>
+        </div>
+        <button type="button" class="rail-toggle-btn" @click="toggleRightPanel">收起</button>
+      </div>
       <section class="panel">
         <h2>Header</h2>
         <div class="grid2">
@@ -386,6 +396,22 @@
         </div>
       </div>
     </div>
+    <button
+      v-if="leftPanelCollapsed"
+      type="button"
+      class="rail-reopen rail-reopen-left"
+      @click="toggleLeftPanel"
+    >
+      道路列表
+    </button>
+    <button
+      v-if="rightPanelCollapsed"
+      type="button"
+      class="rail-reopen rail-reopen-right"
+      @click="toggleRightPanel"
+    >
+      属性面板
+    </button>
   </main>
 </template>
 
@@ -464,9 +490,11 @@ const {
   validateDialog
 } = useAppLogic();
 
-import { ref, watch } from 'vue';
+import { nextTick, ref, watch } from 'vue';
 const roadCodeDialogVisible = ref(false);
 const roadCodeEditorText = ref('');
+const leftPanelCollapsed = ref(false);
+const rightPanelCollapsed = ref(false);
 
 watch(selectedRoadCode, (value) => {
   roadCodeEditorText.value = value || '';
@@ -479,5 +507,22 @@ function applyRoadCode() {
   } catch (error) {
     window.alert(String(error?.message || error));
   }
+}
+
+async function refreshCanvasAfterLayoutChange() {
+  await nextTick();
+  window.setTimeout(() => {
+    fitView();
+  }, 280);
+}
+
+async function toggleLeftPanel() {
+  leftPanelCollapsed.value = !leftPanelCollapsed.value;
+  await refreshCanvasAfterLayoutChange();
+}
+
+async function toggleRightPanel() {
+  rightPanelCollapsed.value = !rightPanelCollapsed.value;
+  await refreshCanvasAfterLayoutChange();
 }
 </script>
