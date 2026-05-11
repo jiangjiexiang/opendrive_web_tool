@@ -5,6 +5,8 @@
         <section class="tool-cluster">
           <span class="cluster-label">模式</span>
           <div class="toolbar-group">
+            <button type="button" class="mode-btn" :class="{ active: viewerMode === '2d' }" @click="setViewerMode('2d')">2D画图</button>
+            <button type="button" class="mode-btn" :class="{ active: viewerMode === '3d' }" @click="setViewerMode('3d')">3D查看</button>
             <button type="button" class="mode-btn" :class="{ active: mode === 'draw' }" @click="setMode('draw')">绘制</button>
             <button type="button" class="mode-btn" :class="{ active: mode === 'select' }" @click="setMode('select')">选择</button>
             <button type="button" class="mode-btn" :class="{ active: mode === 'measure' }" @click="setMode('measure')">测距</button>
@@ -157,12 +159,19 @@
             <span>坐标 y={{ formatYUp(mouseWorld.y) }}</span>
             <span>yaw={{ formatNum(bgGeo.yaw, 3) }}</span>
             <span v-if="measureStats.pointCount">测距 点={{ measureStats.pointCount }} | 段={{ measureStats.segmentCount }} | 总长={{ formatNum(measureStats.total, 3) }}m</span>
-            <span v-if="hoverRoadCoord.roadId">Road {{ hoverRoadCoord.roadId }} | Lane {{ hoverRoadCoord.laneId || '-' }} | s={{ formatNum(hoverRoadCoord.s, 2) }} | t={{ formatNum(hoverRoadCoord.t, 2) }}</span>
+            <span v-if="viewerMode === '2d' && hoverRoadCoord.roadId">Road {{ hoverRoadCoord.roadId }} | Lane {{ hoverRoadCoord.laneId || '-' }} | s={{ formatNum(hoverRoadCoord.s, 2) }} | t={{ formatNum(hoverRoadCoord.t, 2) }}</span>
           </div>
         </div>
-        <div ref="canvasWrap" class="canvas-wrap">
+        <div ref="canvasWrap" class="canvas-wrap" :class="{ 'is-hidden-viewer': viewerMode !== '2d' }">
           <canvas ref="canvasEl" class="canvas-el" width="1280" height="720" />
         </div>
+        <ThreeRoadViewer
+          v-if="viewerMode === '3d'"
+          class="viewer-3d"
+          :roads="roads"
+          :selected-road-id="selectedRoad ? String(selectedRoad.id) : ''"
+          @select-road="selectRoadById"
+        />
       </div>
       <div class="stage-tip">
         左键交互，滚轮缩放，空格+拖动平移，选择模式可拖当前道路控制点，测距模式可多点测量(米)
@@ -417,6 +426,7 @@
 
 <script setup>
 import { useAppLogic } from './appLogic.js';
+import ThreeRoadViewer from './ThreeRoadViewer.vue';
 
 const {
   mode,
@@ -495,6 +505,7 @@ const roadCodeDialogVisible = ref(false);
 const roadCodeEditorText = ref('');
 const leftPanelCollapsed = ref(false);
 const rightPanelCollapsed = ref(false);
+const viewerMode = ref('2d');
 
 watch(selectedRoadCode, (value) => {
   roadCodeEditorText.value = value || '';
@@ -524,5 +535,17 @@ async function toggleLeftPanel() {
 async function toggleRightPanel() {
   rightPanelCollapsed.value = !rightPanelCollapsed.value;
   await refreshCanvasAfterLayoutChange();
+}
+
+async function setViewerMode(nextMode) {
+  viewerMode.value = nextMode === '3d' ? '3d' : '2d';
+  if (viewerMode.value === '2d') {
+    await refreshCanvasAfterLayoutChange();
+  }
+}
+
+function selectRoadById(roadId) {
+  const index = roads.value.findIndex((road) => String(road?.id ?? '') === String(roadId));
+  if (index >= 0) selectRoad(index);
 }
 </script>

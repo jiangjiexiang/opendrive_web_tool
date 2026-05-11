@@ -65,9 +65,9 @@ body,
   grid-column: 1 / -1;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  align-items: stretch;
+  align-items: center;
   gap: 10px;
-  padding: 10px 14px;
+  padding: 6px 10px;
   border-bottom: 1px solid var(--line);
   background:
     linear-gradient(180deg, rgba(13, 22, 21, 0.95), rgba(11, 18, 17, 0.92)),
@@ -116,21 +116,43 @@ body,
 
 .toolbar-strip {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 8px;
   align-items: center;
   min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(214, 161, 102, 0.5) transparent;
+  padding-bottom: 4px;
+}
+
+.toolbar-strip::-webkit-scrollbar {
+  height: 4px;
+}
+
+.toolbar-strip::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.toolbar-strip::-webkit-scrollbar-thumb {
+  background: rgba(214, 161, 102, 0.5);
+  border-radius: 999px;
+}
+
+.toolbar-strip::-webkit-scrollbar-thumb:hover {
+  background: rgba(214, 161, 102, 0.8);
 }
 
 .tool-cluster {
   display: flex;
   flex-direction: column;
-  gap: 5px;
-  padding: 7px 9px 8px;
+  gap: 3px;
+  padding: 5px 7px 6px;
   border: 1px solid var(--line);
   border-radius: 14px;
   background: linear-gradient(180deg, rgba(21, 32, 31, 0.9), rgba(14, 23, 22, 0.85));
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
+  flex-shrink: 0;
 }
 
 .cluster-label {
@@ -144,7 +166,7 @@ body,
 .toolbar-group {
   display: flex;
   gap: 6px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
 }
 
@@ -154,8 +176,9 @@ body,
   justify-content: center;
   align-items: center;
   gap: 6px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   min-width: 0;
+  flex-shrink: 0;
 }
 
 .status-chip {
@@ -303,7 +326,7 @@ body,
 button,
 .link-btn {
   border: 1px solid rgba(214, 161, 102, 0.38);
-  padding: 7px 10px;
+  padding: 6px 9px;
   border-radius: 10px;
   color: #1f1812;
   font-weight: 700;
@@ -312,7 +335,8 @@ button,
   background: linear-gradient(135deg, #d6a166, #f0d0a8);
   transition: transform .16s ease, box-shadow .16s ease, filter .16s ease, border-color .16s ease;
   letter-spacing: 0.01em;
-  font-size: 12px;
+  font-size: 11px;
+  white-space: nowrap;
 }
 
 button:hover,
@@ -739,6 +763,8 @@ code {
 
 .canvas-wrap {
   position: relative;
+  grid-row: 2;
+  grid-column: 1;
   min-height: 0;
   width: 100%;
   height: 100%;
@@ -758,11 +784,56 @@ code {
     border-color 240ms ease;
 }
 
+.canvas-wrap.is-hidden-viewer {
+  opacity: 0;
+  pointer-events: none;
+  transform: scale(0.995);
+}
+
 .canvas-el {
   width: 100%;
   height: 100%;
   display: block;
   cursor: crosshair;
+}
+
+.viewer-3d {
+  grid-row: 2;
+  grid-column: 1;
+  min-width: 0;
+  min-height: 0;
+  border: 1px solid rgba(190, 223, 209, 0.16);
+  border-radius: 24px;
+  overflow: hidden;
+  background: #101817;
+  box-shadow: 0 24px 44px rgba(2, 12, 10, 0.3);
+  animation: viewerFadeIn 220ms ease-out both;
+}
+
+.three-viewer,
+.three-viewer canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.three-viewer {
+  cursor: grab;
+}
+
+.three-viewer:active {
+  cursor: grabbing;
+}
+
+@keyframes viewerFadeIn {
+  from {
+    opacity: 0;
+    transform: scale(0.995);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
 }
 
 .hidden-file {
@@ -1049,6 +1120,31 @@ code {
   .topbar {
     grid-template-columns: 1fr;
     align-items: start;
+    gap: 6px;
+  }
+
+  .toolbar-strip {
+    gap: 5px;
+  }
+
+  .tool-cluster {
+    padding: 4px 6px 5px;
+    border-radius: 12px;
+    gap: 2px;
+  }
+
+  .toolbar-group {
+    gap: 4px;
+  }
+
+  button,
+  .link-btn {
+    padding: 5px 7px;
+    font-size: 10px;
+  }
+
+  .cluster-label {
+    font-size: 9px;
   }
 
   .brand-row {
@@ -1059,7 +1155,7 @@ code {
 
   .topbar-status {
     flex-direction: row;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
     justify-content: flex-start;
   }
 
@@ -1113,17 +1209,40 @@ code {
   }
 
   .topbar {
-    padding: 8px 10px;
+    padding: 5px 8px;
+    gap: 6px;
+  }
+
+  .toolbar-strip {
+    gap: 5px;
   }
 
   .tool-cluster {
-    padding: 6px 7px 7px;
+    padding: 4px 6px 5px;
     border-radius: 12px;
+    gap: 2px;
+  }
+
+  .toolbar-group {
+    gap: 4px;
   }
 
   button,
   .link-btn {
-    padding: 6px 8px;
+    padding: 5px 7px;
+    font-size: 10px;
+  }
+
+  .cluster-label {
+    font-size: 9px;
+  }
+
+  .status-chip {
+    padding: 5px 7px;
+    min-width: 72px;
+  }
+
+  .status-chip strong {
     font-size: 11px;
   }
 
@@ -1143,24 +1262,35 @@ code {
 
 @media (max-width: 720px) {
   .topbar {
-    padding: 8px;
+    padding: 4px 6px;
+    gap: 4px;
   }
 
   .toolbar-strip,
   .toolbar-group {
-    gap: 6px;
+    gap: 4px;
   }
 
   .tool-cluster {
-    width: 100%;
-    border-radius: 12px;
-    padding: 7px;
+    border-radius: 10px;
+    padding: 4px 5px 5px;
+    gap: 2px;
+  }
+
+  .cluster-label {
+    font-size: 8px;
+  }
+
+  button,
+  .link-btn {
+    padding: 4px 6px;
+    font-size: 10px;
   }
 
   .toolbar-group button {
-    flex: 1 1 88px;
+    flex: 0 0 auto;
     min-width: 0;
-    white-space: normal;
+    white-space: nowrap;
   }
 
   .status-chip {
@@ -1246,14 +1376,14 @@ code {
 
 @media (max-height: 760px) and (min-width: 981px) {
   .topbar {
-    padding-top: 6px;
-    padding-bottom: 6px;
+    padding-top: 4px;
+    padding-bottom: 4px;
   }
 
   .tool-cluster {
-    gap: 4px;
-    padding-top: 5px;
-    padding-bottom: 6px;
+    gap: 2px;
+    padding-top: 4px;
+    padding-bottom: 4px;
   }
 
   .sidebar {
