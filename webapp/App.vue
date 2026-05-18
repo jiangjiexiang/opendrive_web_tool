@@ -88,7 +88,7 @@
 
     <div class="rail-dock rail-dock-left overlay-panel">
       <div class="rail-dock-head">
-        <h2 class="rail-title">道路列表</h2>
+        <h2 class="rail-title">列表</h2>
         <div class="panel-heading-actions">
           <span class="panel-badge">{{ roads.length }}</span>
           <button type="button" class="rail-toggle-btn" :aria-expanded="!leftPanelCollapsed" @click="toggleLeftPanel">
@@ -99,6 +99,23 @@
     </div>
 
     <aside class="sidebar left-rail overlay-panel overlay-left" :aria-hidden="leftPanelCollapsed">
+      <div class="side-panel-body">
+      <nav class="side-panel-tabs" role="tablist" aria-label="列表分类">
+        <button
+          v-for="tab in leftPanelTabs"
+          :key="tab.id"
+          type="button"
+          role="tab"
+          class="side-panel-tab"
+          :class="{ active: leftPanelTab === tab.id }"
+          :aria-selected="leftPanelTab === tab.id"
+          @click="leftPanelTab = tab.id"
+        >
+          {{ tab.label }}
+        </button>
+      </nav>
+      <div class="side-panel-content">
+      <div v-show="leftPanelTab === 'measure'" class="side-panel-tab-pane">
       <section class="panel measure-panel">
         <div class="panel-heading measure-panel-heading">
           <h2>测距信息</h2>
@@ -130,6 +147,9 @@
         <p v-else class="measure-empty">测距模式下在画布左键点击添加测量点</p>
       </section>
 
+      </div>
+
+      <div v-show="leftPanelTab === 'roads'" class="side-panel-tab-pane">
       <section class="panel road-panel">
         <div class="road-search-wrap">
           <input v-model="roadSearchQuery" type="search" placeholder="搜索 road id" class="road-search-input" />
@@ -235,6 +255,31 @@
           <div v-if="!roads.length" class="empty">暂无道路</div>
         </div>
       </section>
+      </div>
+
+      <div v-show="leftPanelTab === 'junction'" class="side-panel-tab-pane">
+      <section class="panel junction-list-panel">
+        <div class="junction-list">
+          <div
+            v-for="mesh in junctionMeshes"
+            :key="`junction-${mesh.id}`"
+            class="road-item junction-item"
+          >
+            <button type="button" class="road-item-select" @click="centerViewOnJunction(mesh.id)">
+              <div>Junction {{ mesh.id }}</div>
+              <div class="meta">
+                {{ (mesh.approaches || []).length }} 条接入
+                | {{ (mesh.connectorMeta || []).length }} 条连接
+              </div>
+            </button>
+          </div>
+          <div v-if="!junctionMeshes.length" class="empty">暂无路口</div>
+        </div>
+      </section>
+      </div>
+      </div>
+      </div>
+
       <input ref="xodrFileInput" type="file" accept=".xodr,.xml,text/xml,application/xml" class="hidden-file" @change="importXodr" />
       <input ref="mapYamlFileInput" type="file" accept=".yaml,.yml,text/yaml,text/plain" class="hidden-file" @change="importMapYaml" />
       <input ref="bgFileInput" type="file" accept="image/*,.pgm,.yaml,.yml,text/yaml,text/plain" multiple class="hidden-file" @change="uploadBackground" />
@@ -251,6 +296,24 @@
     </div>
 
     <aside class="sidebar right-rail overlay-panel overlay-right" :aria-hidden="rightPanelCollapsed">
+      <div class="side-panel-body">
+      <nav class="side-panel-tabs" role="tablist" aria-label="属性面板分类">
+        <button
+          v-for="tab in rightPanelTabs"
+          :key="tab.id"
+          type="button"
+          role="tab"
+          class="side-panel-tab"
+          :class="{ active: rightPanelTab === tab.id }"
+          :aria-selected="rightPanelTab === tab.id"
+          @click="rightPanelTab = tab.id"
+        >
+          {{ tab.label }}
+        </button>
+      </nav>
+
+      <div class="side-panel-content">
+      <div v-show="rightPanelTab === 'road'" class="side-panel-tab-pane">
       <section v-if="mode === 'draw'" class="panel">
         <h2>Header</h2>
         <div class="grid2">
@@ -347,7 +410,9 @@
           <div v-if="connectorRebuildPending" class="meta" style="grid-column: 1 / -1; color: #f0c060;">正在应用…</div>
         </div>
       </section>
+      </div>
 
+      <div v-show="rightPanelTab === 'pointcloud'" class="side-panel-tab-pane">
       <section class="panel">
         <h2>点云</h2>
         <div class="grid2">
@@ -376,8 +441,10 @@
           </div>
         </div>
       </section>
+      </div>
 
-      <section v-if="mode === 'connect'" class="panel">
+      <div v-show="rightPanelTab === 'connect'" class="side-panel-tab-pane">
+      <section class="panel">
         <h2>弯道连接</h2>
         <div class="grid2">
           <label style="grid-column: 1 / -1;">弧度（越大越"鼓"）
@@ -393,8 +460,10 @@
           </div>
         </div>
       </section>
+      </div>
 
-      <section v-if="mode === 'junction'" class="panel">
+      <div v-show="rightPanelTab === 'junction'" class="side-panel-tab-pane">
+      <section class="panel">
         <h2>自动路口生成</h2>
         <div class="grid2">
           <label>边缘留白(m)
@@ -423,6 +492,9 @@
           </div>
         </div>
       </section>
+      </div>
+      </div>
+      </div>
 
     </aside>
 
@@ -609,6 +681,8 @@ const {
   junctionUi,
   junctionDraft,
   junctionMeshes,
+  junctionSpecs,
+  centerViewOnJunction,
   generateJunctionFromDraft,
   clearJunctionDraft,
   roadForm,
@@ -617,13 +691,56 @@ const {
   validateDialog
 } = useAppLogic();
 
-import { nextTick, ref, watch } from 'vue';
+import { computed, nextTick, ref, watch } from 'vue';
 const roadCodeDialogVisible = ref(false);
 const roadCodeEditorText = ref('');
 const leftPanelCollapsed = ref(false);
 const rightPanelCollapsed = ref(false);
 const viewerMode = ref('2d');
 const connectorRebuildPending = ref(false);
+const leftPanelTab = ref('roads');
+const leftPanelTabs = [
+  { id: 'roads', label: '道路' },
+  { id: 'measure', label: '测距' },
+  { id: 'junction', label: '路口' }
+];
+
+const junctionListRows = computed(() => (junctionMeshes.value || []).map((mesh) => {
+  const id = String(mesh?.id ?? '');
+  const spec = (junctionSpecs.value || []).find((item) => String(item?.id ?? '') === id);
+  return {
+    mesh,
+    id,
+    name: String(spec?.name || `junction_${id}`)
+  };
+}));
+
+const rightPanelTab = ref('road');
+
+const rightPanelTabs = computed(() => {
+  const tabs = [
+    { id: 'road', label: '道路' },
+    { id: 'pointcloud', label: '点云' }
+  ];
+  if (mode.value === 'connect') tabs.push({ id: 'connect', label: '连接' });
+  if (mode.value === 'junction') tabs.push({ id: 'junction', label: '路口' });
+  return tabs;
+});
+
+watch(mode, (next) => {
+  if (next === 'measure') leftPanelTab.value = 'measure';
+  if (next === 'connect') rightPanelTab.value = 'connect';
+  else if (next === 'junction') rightPanelTab.value = 'junction';
+  else if (!rightPanelTabs.value.some((tab) => tab.id === rightPanelTab.value)) {
+    rightPanelTab.value = 'road';
+  }
+});
+
+watch(rightPanelTabs, (tabs) => {
+  if (!tabs.some((tab) => tab.id === rightPanelTab.value)) {
+    rightPanelTab.value = tabs[0]?.id || 'road';
+  }
+});
 
 let connectorRebuildTimer = null;
 watch(

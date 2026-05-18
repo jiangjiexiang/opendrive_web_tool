@@ -46,7 +46,7 @@ body,
   --overlay-gap: 12px;
   --overlay-top: 12px;
   --overlay-toolbar-space: 58px;
-  --overlay-panel-width: clamp(260px, 24vw, 340px);
+  --overlay-panel-width: clamp(320px, 30vw, 440px);
   --rail-dock-height: 44px;
 }
 
@@ -279,10 +279,102 @@ body,
   left: var(--overlay-gap);
   display: flex;
   flex-direction: column;
+  gap: 10px;
+  overflow: hidden;
 }
 
 .right-rail {
   right: var(--overlay-gap);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow: hidden;
+}
+
+.side-panel-body {
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  flex: 1;
+  min-height: 0;
+  gap: 0;
+}
+
+.side-panel-tabs {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  gap: 4px;
+  width: 40px;
+  padding: 0 8px 0 0;
+  margin-right: 4px;
+  border-right: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.side-panel-tab {
+  flex: 0 0 auto;
+  width: 100%;
+  min-width: 0;
+  padding: 10px 4px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-muted, #9ab0a8);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.2;
+  text-align: center;
+  writing-mode: vertical-rl;
+  text-orientation: upright;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.side-panel-tab:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #d8ebe6;
+}
+
+.side-panel-tab.active {
+  background: rgba(80, 180, 150, 0.22);
+  border-color: rgba(100, 200, 170, 0.45);
+  color: #b8f0dc;
+}
+
+.side-panel-content {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+}
+
+.side-panel-tab-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: min-content;
+  padding-right: 2px;
+}
+
+.junction-list-panel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.junction-list {
+  flex: 1;
+  min-height: 120px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.junction-item .road-item-select {
+  text-align: left;
 }
 
 .layout.left-collapsed .left-rail {
@@ -1231,7 +1323,7 @@ code {
 
 @media (max-width: 980px) {
   .layout {
-    --overlay-panel-width: min(92vw, 320px);
+    --overlay-panel-width: min(94vw, 380px);
     --overlay-toolbar-space: 54px;
   }
 
@@ -1288,7 +1380,7 @@ code {
 
 @media (max-width: 1280px) and (min-width: 981px) {
   .layout {
-    --overlay-panel-width: clamp(240px, 22vw, 300px);
+    --overlay-panel-width: clamp(300px, 28vw, 400px);
   }
 
   .topbar {

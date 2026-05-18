@@ -2035,6 +2035,17 @@ function centerViewOnRoad(index) {
   render();
 }
 
+function centerViewOnJunction(meshId) {
+  const mesh = (junctionMeshes.value || []).find((item) => String(item?.id ?? '') === String(meshId));
+  if (!mesh?.center || !canvasEl.value) return;
+  const centerX = Number(mesh.center.x);
+  const centerY = Number(mesh.center.y);
+  if (!Number.isFinite(centerX) || !Number.isFinite(centerY)) return;
+  view.offsetX = canvasEl.value.width * 0.5 - centerX * view.scale;
+  view.offsetY = canvasEl.value.height * 0.5 + centerY * view.scale;
+  render();
+}
+
 function nextRoadId() {
   let maxId = 0;
   roads.value.forEach((r) => {
@@ -5323,6 +5334,8 @@ onBeforeUnmount(() => {
     junctionUi,
     junctionDraft,
     junctionMeshes,
+    junctionSpecs,
+    centerViewOnJunction,
     generateJunctionFromDraft,
     clearJunctionDraft,
     roadForm,
