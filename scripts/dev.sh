@@ -53,10 +53,10 @@ if [ ! -x "native/bin/odr_json_parser" ]; then
   npm run build:native
 fi
 
-kill_port 5173
 kill_port 5174
+kill_port 5175
 
-echo "[dev] 启动后端: http://localhost:5174"
+echo "[dev] 启动后端: http://localhost:5175"
 npm run dev:server >/tmp/opendrive_backend.log 2>&1 &
 BACKEND_PID=$!
 
@@ -70,6 +70,6 @@ cleanup() {
 
 trap cleanup EXIT INT TERM
 
-echo "[dev] 启动前端: http://localhost:5173"
+echo "[dev] 启动前端: http://localhost:5174"
 echo "[dev] 后端日志: /tmp/opendrive_backend.log"
 npm run dev

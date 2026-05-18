@@ -6,7 +6,7 @@
   "scripts": {
     "build:native": "bash ./scripts/build-native.sh",
     "dev": "vite",
-    "dev:server": "BACKEND_PORT=5174 node src/server.js",
+    "dev:server": "BACKEND_PORT=5175 node src/server.js",
     "dev:first": "bash ./scripts/first-run-dev.sh",
     "dev:all": "./scripts/dev.sh",
     "build": "vite build",
