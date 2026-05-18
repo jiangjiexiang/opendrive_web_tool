@@ -33,6 +33,9 @@
               {{ importStatus.loading ? '导入中...' : '导入XODR' }}
             </button>
             <button type="button" @click="pickBgFile">上传底图</button>
+            <button type="button" :disabled="!bgImage || !roads.length" @click="downloadBackgroundOverlayImage">下载叠加图</button>
+            <button type="button" @click="pickPointCloudFile">导入点云</button>
+            <button type="button" :disabled="!pointCloud" @click="clearPointCloud">清除点云</button>
             <button type="button" :disabled="!selectedRoad" @click="roadCodeDialogVisible = true">查看OpenDRIVE代码</button>
             <button type="button" @click="openRoadColorDialog">显示设置</button>
           </div>
@@ -50,6 +53,10 @@
         <span class="status-chip">
           <span class="status-label">选中</span>
           <strong>{{ selectedRoad ? selectedRoad.id : '-' }}</strong>
+        </span>
+        <span class="status-chip">
+          <span class="status-label">点云</span>
+          <strong>{{ pointCloud ? formatNum(pointCloud.count, 0) : '-' }}</strong>
         </span>
       </div>
     </header>
@@ -72,6 +79,15 @@
         </div>
         <div v-if="importStatus.message" class="import-status" :class="importStatus.type">
           {{ importStatus.message }}
+        </div>
+        <div v-if="pointCloudStatus.message" class="import-status" :class="pointCloudStatus.type">
+          {{ pointCloudStatus.message }}
+          <div v-if="pointCloudStatus.type === 'loading' || pointCloudStatus.progress > 0" class="point-cloud-progress">
+            <div class="point-cloud-progress-track">
+              <div class="point-cloud-progress-fill" :style="{ width: `${formatPercent(pointCloudStatus.progress)}%` }"></div>
+            </div>
+            <span>{{ formatPercent(pointCloudStatus.progress) }}%</span>
+          </div>
         </div>
         <div ref="roadListEl" class="road-list road-list-fill" @scroll="handleRoadListScroll">
           <template v-if="useVirtualRoadList">
@@ -145,6 +161,7 @@
       <input ref="xodrFileInput" type="file" accept=".xodr,.xml,text/xml,application/xml" class="hidden-file" @change="importXodr" />
       <input ref="mapYamlFileInput" type="file" accept=".yaml,.yml,text/yaml,text/plain" class="hidden-file" @change="importMapYaml" />
       <input ref="bgFileInput" type="file" accept="image/*,.pgm,.yaml,.yml,text/yaml,text/plain" multiple class="hidden-file" @change="uploadBackground" />
+      <input ref="pointCloudFileInput" type="file" accept=".pcd,.xyz,.txt,.csv,text/plain,text/csv" class="hidden-file" @change="importPointCloud" />
     </aside>
 
     <section class="viewer center-stage">
@@ -169,6 +186,7 @@
           v-if="viewerMode === '3d'"
           class="viewer-3d"
           :roads="roads"
+          :point-cloud="pointCloud"
           :selected-road-id="selectedRoad ? String(selectedRoad.id) : ''"
           @select-road="selectRoadById"
         />
@@ -255,7 +273,36 @@
             <input v-model="drawForm.autoJunction" type="checkbox" />
             相交自动生成路口
           </label>
-          <div style="grid-column: 1 / -1;" class="meta">开启后：完成道路时会先做平滑，再尝试在简单十字相交场景自动拆分并生成路口；关闭后只做道路完成，不触发自动路口。</div>
+          <div style="grid-column: 1 / -1;" class="meta">默认关闭。勾选后：完成道路时会先做平滑，再尝试在简单十字相交场景自动拆分并生成路口；未勾选时只完成道路，不触发自动路口。</div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>点云</h2>
+        <div class="grid2">
+          <label style="grid-column: 1 / -1;">点大小
+            <input v-model.number="pointCloudForm.pointSize" type="range" min="0.02" max="1.5" step="0.01" />
+          </label>
+          <div class="meta">点大小: {{ formatNum(pointCloudForm.pointSize, 2) }}</div>
+          <label style="grid-column: 1 / -1;">保留比例 {{ formatNum(pointCloudForm.sampleRatio, 0) }}%
+            <input v-model.number="pointCloudForm.sampleRatio" type="range" min="1" max="100" step="1" />
+          </label>
+          <label style="grid-column: 1 / -1;">最小高度 z {{ formatNum(pointCloudForm.minZ, 1) }}
+            <input v-model.number="pointCloudForm.minZ" type="range" min="-50" max="50" step="0.1" />
+          </label>
+          <label style="grid-column: 1 / -1;">最大高度 z {{ formatNum(pointCloudForm.maxZ, 1) }}
+            <input v-model.number="pointCloudForm.maxZ" type="range" min="-50" max="50" step="0.1" />
+          </label>
+          <div style="grid-column: 1 / -1;" class="meta">
+            当前: {{ pointCloud ? `${formatNum(pointCloud.count, 0)} / ${formatNum(pointCloud.sourceCount || pointCloud.count, 0)} 点` : '未加载' }}
+          </div>
+          <div style="grid-column: 1 / -1;" class="meta">
+            滑块会实时更新3D点云显示。
+          </div>
+          <div class="row" style="grid-column: 1 / -1; margin-top: 4px;">
+            <button type="button" @click="pickPointCloudFile">导入点云</button>
+            <button type="button" :disabled="!pointCloud" @click="clearPointCloud">清除点云</button>
+          </div>
         </div>
       </section>
 
@@ -437,13 +484,21 @@ const {
   fitView,
   runValidate,
   generateAndDownloadXodr,
+  downloadBackgroundOverlayImage,
   pickXodrFile,
   pickBgFile,
+  pickPointCloudFile,
   importStatus,
+  pointCloud,
+  bgImage,
+  pointCloudStatus,
+  pointCloudForm,
+  clearPointCloud,
   openRoadColorDialog,
   roads,
   selectedRoadIndex,
   formatNum,
+  formatPercent,
   getChildRoadEntries,
   hasChildRoadEntries,
   isRoadChildrenExpanded,
@@ -464,9 +519,11 @@ const {
   xodrFileInput,
   mapYamlFileInput,
   bgFileInput,
+  pointCloudFileInput,
   importXodr,
   importMapYaml,
   uploadBackground,
+  importPointCloud,
   canvasWrap,
   canvasEl,
   mouseWorld,

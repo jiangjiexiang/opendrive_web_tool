@@ -1,4 +1,4 @@
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
+import { computed, markRaw, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from 'vue';
 import { rotateVec } from './editorUtils.js';
 import { buildLineArcGeometryFromPoints as buildGeneratedLineArcGeometry } from './lineArcGeometry.js';
 import { selectedRoadToOpenDriveXml } from './roadOpenDriveXml.js';
@@ -12,10 +12,10 @@ import {
 } from './xodrParsers.js';
 import {
   applyMapYamlToGeo,
-  loadBackgroundImage,
-  backgroundFileToDataUrl,
+  loadBackgroundFile,
   isYamlFile
 } from './backgroundMap.js';
+import { parsePointCloudBuffer } from './pointCloudParser.js';
 import { createQualityDialogState, runQualityCheck } from './qualityCheck.js';
 import {
   createRoadColorState,
@@ -34,6 +34,7 @@ const roadListEl = ref(null);
 const xodrFileInput = ref(null);
 const mapYamlFileInput = ref(null);
 const bgFileInput = ref(null);
+const pointCloudFileInput = ref(null);
 
 const roads = ref([]);
 const selectedRoadIndex = ref(-1);
@@ -47,6 +48,19 @@ const junctionDraft = ref({ handles: [] });
 const junctionMeshes = ref([]);
 const junctionSpecs = ref([]);
 const bgImage = ref(null);
+const rawPointCloud = shallowRef(null);
+const pointCloud = shallowRef(null);
+const pointCloudStatus = reactive({
+  message: '',
+  type: '',
+  progress: 0
+});
+const pointCloudForm = reactive({
+  pointSize: 0.18,
+  sampleRatio: 30,
+  minZ: -10,
+  maxZ: 10
+});
 const mouseWorld = reactive({ x: 0, y: 0 });
 const hoverRoadCoord = reactive({
   roadId: '',
@@ -113,7 +127,7 @@ const connectForm = reactive({
 
 const drawForm = reactive({
   smoothing: 0.55,
-  autoJunction: true
+  autoJunction: false
 });
 
 const junctionForm = reactive({
@@ -154,6 +168,8 @@ const view = reactive({
 
 const GRID_BASE_M = 0.1;
 const GRID_TARGET_PX = 9;
+const MAX_EXPORT_IMAGE_PIXELS = 16000000;
+const MAX_EXPORT_IMAGE_SIDE = 8192;
 const ROAD_RENDER_CACHE = Symbol('roadRenderCache');
 const ROAD_BOUNDS_CACHE = Symbol('roadBoundsCache');
 const ROAD_LIST_ROW_HEIGHT = 56;
@@ -163,6 +179,7 @@ let ctx = null;
 let resizeObserver = null;
 let roadListResizeObserver = null;
 let renderFrame = 0;
+let activeRenderCanvas = null;
 const roadListScrollTop = ref(0);
 const roadListViewportHeight = ref(320);
 const collapsedRoadGroups = ref({});
@@ -392,9 +409,18 @@ watch(
   () => detachImportedSource({ headerChanged: true })
 );
 
+watch(pointCloudForm, () => {
+  refreshPointCloudDisplay();
+}, { deep: true });
+
 function formatNum(v, digits = 2) {
   const n = Number(v);
   return Number.isFinite(n) ? n.toFixed(digits) : '-';
+}
+
+function formatPercent(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.floor(Math.max(0, Math.min(100, n))) : 0;
 }
 
 function formatYUp(v, digits = 2) {
@@ -1121,6 +1147,16 @@ function drawFilledBand(leftPath, rightPath, fillStyle) {
   ctx.fill();
 }
 
+function drawNativeLaneMeshes(laneMeshes, fillStyle) {
+  (Array.isArray(laneMeshes) ? laneMeshes : []).forEach((mesh) => {
+    const outer = Array.isArray(mesh?.outer) ? mesh.outer : [];
+    const inner = Array.isArray(mesh?.inner) ? mesh.inner : [];
+    if (outer.length > 1 && inner.length > 1) {
+      drawFilledBand(outer, inner, fillStyle);
+    }
+  });
+}
+
 const DEFAULT_ROAD_RENDER_STYLE = {
   baseFill: 'rgba(58, 146, 255, 0.2)',
   baseEdge: 'rgba(182, 226, 255, 0.9)',
@@ -1281,6 +1317,7 @@ function getRoadRenderData(road) {
   const nativeLeftBoundaryRef = road.nativeLeftBoundary;
   const nativeRightBoundaryRef = road.nativeRightBoundary;
   const nativeLaneBoundariesRef = road.nativeLaneBoundaries;
+  const nativeLaneMeshesRef = road.nativeLaneMeshes;
   const laneOffsetRecordsRef = road.laneOffsetRecords;
   const laneSectionsRef = road.laneSections;
   const unchanged = cache
@@ -1288,6 +1325,7 @@ function getRoadRenderData(road) {
     && cache.nativeLeftBoundaryRef === nativeLeftBoundaryRef
     && cache.nativeRightBoundaryRef === nativeRightBoundaryRef
     && cache.nativeLaneBoundariesRef === nativeLaneBoundariesRef
+    && cache.nativeLaneMeshesRef === nativeLaneMeshesRef
     && cache.laneOffsetRecordsRef === laneOffsetRecordsRef
     && cache.laneSectionsRef === laneSectionsRef
     && cache.leftLaneCount === leftLaneCount
@@ -1299,8 +1337,12 @@ function getRoadRenderData(road) {
 
   const hasNativeBoundaries = Array.isArray(road.nativeLeftBoundary) && road.nativeLeftBoundary.length > 1
     && Array.isArray(road.nativeRightBoundary) && road.nativeRightBoundary.length > 1;
+  const hasNativeLaneMeshes = Array.isArray(road.nativeLaneMeshes)
+    && road.nativeLaneMeshes.some((mesh) => Array.isArray(mesh?.outer) && mesh.outer.length > 1 && Array.isArray(mesh?.inner) && mesh.inner.length > 1);
   const data = {
     hasNativeBoundaries,
+    hasNativeLaneMeshes,
+    nativeLaneMeshes: hasNativeLaneMeshes ? road.nativeLaneMeshes : [],
     centerRef: hasNativeBoundaries ? road.points || [] : buildOffsetPath(road, (profile) => profile.laneOffset),
     leftBoundary: hasNativeBoundaries ? road.nativeLeftBoundary : buildOffsetPath(road, (profile) => profile.leftBoundary),
     rightBoundary: hasNativeBoundaries ? road.nativeRightBoundary : buildOffsetPath(road, (profile) => profile.rightBoundary),
@@ -1323,6 +1365,7 @@ function getRoadRenderData(road) {
     nativeLeftBoundaryRef,
     nativeRightBoundaryRef,
     nativeLaneBoundariesRef,
+    nativeLaneMeshesRef,
     laneOffsetRecordsRef,
     laneSectionsRef,
     leftLaneCount,
@@ -1335,9 +1378,13 @@ function getRoadRenderData(road) {
   return data;
 }
 
+function getActiveCanvas() {
+  return activeRenderCanvas || canvasEl.value;
+}
+
 function getViewportBounds(marginPx = 80) {
-  if (!canvasEl.value) return null;
-  const canvas = canvasEl.value;
+  const canvas = getActiveCanvas();
+  if (!canvas) return null;
   const worldMin = screenToWorld(-marginPx, -marginPx);
   const worldMax = screenToWorld(canvas.width + marginPx, canvas.height + marginPx);
   return {
@@ -1395,8 +1442,15 @@ function drawRoadSurface(road, selected, renderData = null, options = {}) {
         lane: DEFAULT_ROAD_RENDER_STYLE.baseLane,
         center: DEFAULT_ROAD_RENDER_STYLE.baseCenter
       });
-  if (resolvedRenderData.hasNativeBoundaries) {
+  if (resolvedRenderData.hasNativeLaneMeshes) {
+    drawNativeLaneMeshes(resolvedRenderData.nativeLaneMeshes, palette.fill);
+  } else if (resolvedRenderData.hasNativeBoundaries) {
     drawFilledBand(resolvedRenderData.leftBoundary, resolvedRenderData.rightBoundary, palette.fill);
+  } else {
+    drawFilledBand(resolvedRenderData.leftBoundary, resolvedRenderData.rightBoundary, palette.fill);
+  }
+
+  if (resolvedRenderData.hasNativeBoundaries) {
     drawPolyline(resolvedRenderData.leftBoundary, palette.edge, selected ? 2.2 : 1.6);
     drawPolyline(resolvedRenderData.rightBoundary, palette.edge, selected ? 2.2 : 1.6);
     if (options.showLaneMarkings || selected) {
@@ -1409,7 +1463,6 @@ function drawRoadSurface(road, selected, renderData = null, options = {}) {
     }
     return;
   }
-  drawFilledBand(resolvedRenderData.leftBoundary, resolvedRenderData.rightBoundary, palette.fill);
   drawPolyline(resolvedRenderData.leftBoundary, palette.edge, selected ? 2.2 : 1.6);
   drawPolyline(resolvedRenderData.rightBoundary, palette.edge, selected ? 2.2 : 1.6);
   if (options.showLaneMarkings || selected) {
@@ -1423,8 +1476,8 @@ function drawRoadSurface(road, selected, renderData = null, options = {}) {
 }
 
 function drawMeterGrid() {
-  if (!ctx || !canvasEl.value) return;
-  const canvas = canvasEl.value;
+  const canvas = getActiveCanvas();
+  if (!ctx || !canvas) return;
   const roadCount = roads.value.length;
   if (roadCount > 2600 && view.scale < 1.6) {
     ctx.fillStyle = '#000000';
@@ -1486,8 +1539,8 @@ function drawMeterGrid() {
 }
 
 function drawOriginAxes() {
-  if (!ctx || !canvasEl.value) return;
-  const canvas = canvasEl.value;
+  const canvas = getActiveCanvas();
+  if (!ctx || !canvas) return;
   const origin = worldToScreen(0, 0);
 
   // Y axis (x = 0)
@@ -1682,16 +1735,25 @@ function drawJunctionMeshes() {
   });
 }
 
-function performRender() {
-  if (!ctx || !canvasEl.value) return;
-  const canvas = canvasEl.value;
+function performRender(options = {}) {
+  const canvas = getActiveCanvas();
+  if (!ctx || !canvas) return;
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  drawMeterGrid();
+  const exportMode = Boolean(options.exportMode);
+  if (exportMode) {
+    ctx.fillStyle = '#000000';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  } else {
+    drawMeterGrid();
+  }
   if (bgImage.value) {
     const res = Math.max(1e-6, Number(bgGeo.resolution || 1));
     const yaw = Number(bgGeo.yaw || 0);
-    const width = Number(bgImage.value.width || bgGeo.imageWidth || 0);
-    const height = Number(bgImage.value.height || bgGeo.imageHeight || 0);
+    const image = bgImage.value.image || bgImage.value;
+    const width = Number(bgImage.value.width || bgGeo.imageWidth || image.width || 0);
+    const height = Number(bgImage.value.height || bgGeo.imageHeight || image.height || 0);
+    const renderWidth = Number(bgImage.value.renderWidth || image.width || width);
+    const renderHeight = Number(bgImage.value.renderHeight || image.height || height);
     const topLeftWorld = vecAdd(
       { x: Number(bgGeo.originX || 0), y: Number(bgGeo.originY || 0) },
       rotateVec({ x: 0, y: height * res }, yaw)
@@ -1708,10 +1770,10 @@ function performRender() {
       p.x,
       p.y
     );
-    ctx.drawImage(bgImage.value, 0, 0, width, height);
+    ctx.drawImage(image, 0, 0, renderWidth, renderHeight, 0, 0, width, height);
     ctx.restore();
   }
-  drawOriginAxes();
+  if (!exportMode) drawOriginAxes();
   drawJunctionMeshes();
   const viewportBounds = getViewportBounds(120);
   const visibleRoads = [];
@@ -1724,11 +1786,11 @@ function performRender() {
     visibleRoads.push({ road: r, idx });
     visiblePointCount += Array.isArray(r.points) ? r.points.length : 0;
   });
-  const drawLabels = roadColorConfig.showRoadLabels && shouldDrawRoadLabels(visibleRoads.length);
+  const drawLabels = !exportMode && roadColorConfig.showRoadLabels && shouldDrawRoadLabels(visibleRoads.length);
   const drawArrows = shouldDrawLaneArrows(visibleRoads.length, visiblePointCount);
   const overviewMode = shouldUseOverviewRoadRendering(visibleRoads.length, visiblePointCount);
-  const suppressCenterline = !overviewMode && (view.scale < 1.1 || visibleRoads.length > 220);
-  const showLaneMarkings = !overviewMode && view.scale >= 1.25 && visibleRoads.length <= 160;
+  const suppressCenterline = exportMode ? false : (!overviewMode && (view.scale < 1.1 || visibleRoads.length > 220));
+  const showLaneMarkings = exportMode ? visibleRoads.length <= 600 : (!overviewMode && view.scale >= 1.25 && visibleRoads.length <= 160);
   visibleRoads.forEach(({ road: r, idx }) => {
     const sel = idx === selectedRoadIndex.value;
     const needDetail = !overviewMode || sel || drawArrows || drawLabels;
@@ -1753,12 +1815,14 @@ function performRender() {
       ctx.fillText(`R${r.id}`, p.x + 7, p.y - 6);
     }
   });
-  drawDraftRoadPreview();
-  if (extendDraft.value) {
-    drawPolyline([extendDraft.value.anchor, extendDraft.value.hover], '#77f2c8', 2, true);
+  if (!exportMode) {
+    drawDraftRoadPreview();
+    if (extendDraft.value) {
+      drawPolyline([extendDraft.value.anchor, extendDraft.value.hover], '#77f2c8', 2, true);
+    }
+    drawMeasureOverlay();
+    drawHandles();
   }
-  drawMeasureOverlay();
-  drawHandles();
 }
 
 function render(force = false) {
@@ -3722,6 +3786,9 @@ function completeExtend(toPoint) {
 
 function setMode(next) {
   mode.value = next;
+  if (next === 'junction') {
+    drawForm.autoJunction = true;
+  }
   connectDraft.value = { first: null, second: null };
   extendDraft.value = null;
   junctionDraft.value = { handles: [] };
@@ -4140,6 +4207,118 @@ function downloadXodr() {
   URL.revokeObjectURL(url);
 }
 
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function getBackgroundWorldBounds() {
+  if (!bgImage.value) return null;
+  const res = Math.max(1e-6, Number(bgGeo.resolution || 1));
+  const yaw = Number(bgGeo.yaw || 0);
+  const width = Number(bgImage.value.width || bgGeo.imageWidth || 0);
+  const height = Number(bgImage.value.height || bgGeo.imageHeight || 0);
+  if (!(width > 0) || !(height > 0)) return null;
+  const origin = { x: Number(bgGeo.originX || 0), y: Number(bgGeo.originY || 0) };
+  const corners = [
+    origin,
+    vecAdd(origin, rotateVec({ x: width * res, y: 0 }, yaw)),
+    vecAdd(origin, rotateVec({ x: width * res, y: height * res }, yaw)),
+    vecAdd(origin, rotateVec({ x: 0, y: height * res }, yaw))
+  ];
+  const bounds = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity };
+  corners.forEach((p) => {
+    bounds.minX = Math.min(bounds.minX, p.x);
+    bounds.minY = Math.min(bounds.minY, p.y);
+    bounds.maxX = Math.max(bounds.maxX, p.x);
+    bounds.maxY = Math.max(bounds.maxY, p.y);
+  });
+  if (!Number.isFinite(bounds.minX) || !Number.isFinite(bounds.minY)
+    || !Number.isFinite(bounds.maxX) || !Number.isFinite(bounds.maxY)) {
+    return null;
+  }
+  return bounds;
+}
+
+function calculateExportSize(bounds) {
+  const worldWidth = Math.max(1e-6, bounds.maxX - bounds.minX);
+  const worldHeight = Math.max(1e-6, bounds.maxY - bounds.minY);
+  const sourceWidth = Math.max(1, Number(bgImage.value?.width || bgGeo.imageWidth || 0));
+  const sourceHeight = Math.max(1, Number(bgImage.value?.height || bgGeo.imageHeight || 0));
+  const baseScale = Math.min(
+    sourceWidth / worldWidth,
+    sourceHeight / worldHeight
+  );
+  const rawWidth = Math.max(1, Math.ceil(worldWidth * baseScale));
+  const rawHeight = Math.max(1, Math.ceil(worldHeight * baseScale));
+  const pixelScale = Math.sqrt(MAX_EXPORT_IMAGE_PIXELS / Math.max(1, rawWidth * rawHeight));
+  const sideScale = MAX_EXPORT_IMAGE_SIDE / Math.max(rawWidth, rawHeight);
+  const scaleDown = Math.min(1, pixelScale, sideScale);
+  return {
+    width: Math.max(1, Math.floor(rawWidth * scaleDown)),
+    height: Math.max(1, Math.floor(rawHeight * scaleDown))
+  };
+}
+
+async function downloadBackgroundOverlayImage() {
+  if (!bgImage.value) {
+    window.alert('请先上传底图。');
+    return;
+  }
+  if (!roads.value.length) {
+    window.alert('请先导入或绘制OpenDRIVE道路。');
+    return;
+  }
+  const bounds = getBackgroundWorldBounds();
+  if (!bounds) {
+    window.alert('底图范围无效，无法导出图像。');
+    return;
+  }
+  const exportSize = calculateExportSize(bounds);
+  const exportCanvas = document.createElement('canvas');
+  exportCanvas.width = exportSize.width;
+  exportCanvas.height = exportSize.height;
+  const exportCtx = exportCanvas.getContext('2d');
+  if (!exportCtx) {
+    window.alert('当前浏览器无法创建导出画布。');
+    return;
+  }
+
+  const prevCtx = ctx;
+  const prevCanvas = activeRenderCanvas;
+  const prevScale = view.scale;
+  const prevOffsetX = view.offsetX;
+  const prevOffsetY = view.offsetY;
+  try {
+    ctx = exportCtx;
+    activeRenderCanvas = exportCanvas;
+    const worldWidth = Math.max(1e-6, bounds.maxX - bounds.minX);
+    const worldHeight = Math.max(1e-6, bounds.maxY - bounds.minY);
+    view.scale = Math.min(exportCanvas.width / worldWidth, exportCanvas.height / worldHeight);
+    view.offsetX = -bounds.minX * view.scale + (exportCanvas.width - worldWidth * view.scale) / 2;
+    view.offsetY = bounds.maxY * view.scale + (exportCanvas.height - worldHeight * view.scale) / 2;
+    performRender({ exportMode: true });
+  } finally {
+    ctx = prevCtx;
+    activeRenderCanvas = prevCanvas;
+    view.scale = prevScale;
+    view.offsetX = prevOffsetX;
+    view.offsetY = prevOffsetY;
+    render();
+  }
+
+  const blob = await new Promise((resolve) => exportCanvas.toBlob(resolve, 'image/png'));
+  if (!blob) {
+    window.alert('图像导出失败。');
+    return;
+  }
+  downloadBlob(blob, `${headerForm.name || 'opendrive_map'}_overlay.png`);
+}
+
 function junctionsForExport() {
   const list = [];
   const used = new Set();
@@ -4211,6 +4390,11 @@ function applyNativeRoads(parsedRoads, importedJunctions = [], importedRoadDetai
     nativeLeftBoundary: Array.isArray(r.nativeLeftBoundary) ? r.nativeLeftBoundary.map((p) => ({ x: Number(p.x), y: Number(p.y) })) : [],
     nativeRightBoundary: Array.isArray(r.nativeRightBoundary) ? r.nativeRightBoundary.map((p) => ({ x: Number(p.x), y: Number(p.y) })) : [],
     nativeLaneBoundaries: Array.isArray(r.nativeLaneBoundaries) ? r.nativeLaneBoundaries : [],
+    nativeLaneMeshes: Array.isArray(r.nativeLaneMeshes) ? r.nativeLaneMeshes.map((mesh) => ({
+      laneId: String(mesh?.laneId ?? ''),
+      outer: Array.isArray(mesh?.outer) ? mesh.outer.map((p) => ({ x: Number(p.x), y: Number(p.y) })) : [],
+      inner: Array.isArray(mesh?.inner) ? mesh.inner.map((p) => ({ x: Number(p.x), y: Number(p.y) })) : []
+    })) : [],
     visible: r.visible !== false,
     length: Number.isFinite(Number(r.length)) ? Number(r.length) : polylineLength(r.points || [])
   }));
@@ -4269,6 +4453,107 @@ function pickMapYamlFile() {
 
 function pickBgFile() {
   bgFileInput.value?.click();
+}
+
+function pickPointCloudFile() {
+  pointCloudStatus.message = '';
+  pointCloudStatus.type = '';
+  pointCloudStatus.progress = 0;
+  pointCloudFileInput.value?.click();
+}
+
+function readFileBufferWithProgress(file, onProgress) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onprogress = (event) => {
+      if (event.lengthComputable) {
+        onProgress(Math.min(72, Math.max(1, (event.loaded / event.total) * 72)));
+      }
+    };
+    reader.onerror = () => reject(reader.error || new Error('文件读取失败'));
+    reader.onload = () => resolve(reader.result);
+    reader.readAsArrayBuffer(file);
+  });
+}
+
+function sampledPointIndex(index, ratio) {
+  if (ratio >= 0.999) return true;
+  const bucket = ((index * 2654435761) >>> 0) / 4294967296;
+  return bucket < ratio;
+}
+
+function filteredPackedPointCloud(source, ratio, minZ, maxZ) {
+  const positions = source?.positions instanceof Float32Array ? source.positions : null;
+  if (!positions?.length) return null;
+  const packedColors = source?.colors instanceof Float32Array ? source.colors : null;
+  const outPositions = new Float32Array(positions.length);
+  const outColors = packedColors ? new Float32Array(packedColors.length) : null;
+  let out = 0;
+  for (let index = 0; index < positions.length / 3; index += 1) {
+    const base = index * 3;
+    const z = positions[base + 2];
+    if (!sampledPointIndex(index, ratio) || z < minZ || z > maxZ) continue;
+    outPositions[out] = positions[base];
+    outPositions[out + 1] = positions[base + 1];
+    outPositions[out + 2] = z;
+    if (outColors) {
+      outColors[out] = packedColors[base];
+      outColors[out + 1] = packedColors[base + 1];
+      outColors[out + 2] = packedColors[base + 2];
+    }
+    out += 3;
+  }
+  return {
+    positions: out === outPositions.length ? outPositions : outPositions.slice(0, out),
+    colors: outColors ? (out === outColors.length ? outColors : outColors.slice(0, out)) : null,
+    count: Math.floor(out / 3)
+  };
+}
+
+function filteredObjectPointCloud(source, ratio, minZ, maxZ) {
+  const points = Array.isArray(source?.points) ? source.points : [];
+  if (!points.length) return null;
+  const sourceColors = Array.isArray(source?.colors) ? source.colors : [];
+  const outPoints = [];
+  const outColors = sourceColors.length ? [] : null;
+  points.forEach((point, index) => {
+    const z = Number(point?.z);
+    if (!sampledPointIndex(index, ratio) || z < minZ || z > maxZ) return;
+    outPoints.push(point);
+    if (outColors) outColors.push(sourceColors[index] || { r: 0.72, g: 0.86, b: 1 });
+  });
+  return {
+    points: outPoints,
+    colors: outColors || [],
+    count: outPoints.length
+  };
+}
+
+function refreshPointCloudDisplay() {
+  const source = rawPointCloud.value;
+  if (!source) {
+    pointCloud.value = null;
+    return;
+  }
+  const ratio = Math.max(1, Math.min(100, Number(pointCloudForm.sampleRatio) || 30)) / 100;
+  const minZ = Number.isFinite(Number(pointCloudForm.minZ)) ? Number(pointCloudForm.minZ) : -Infinity;
+  const maxZ = Number.isFinite(Number(pointCloudForm.maxZ)) ? Number(pointCloudForm.maxZ) : Infinity;
+  const filtered = source.positions instanceof Float32Array
+    ? filteredPackedPointCloud(source, ratio, minZ, maxZ)
+    : filteredObjectPointCloud(source, ratio, minZ, maxZ);
+  const sourceCount = Number(source.sourceCount || source.count || 0);
+  pointCloud.value = markRaw({
+    ...(filtered || { points: [], colors: [], count: 0 }),
+    name: source.name || 'point_cloud',
+    sourceCount,
+    pointSize: Math.max(0.01, Number(pointCloudForm.pointSize) || 0.18),
+    sampleRatio: ratio,
+    minZ,
+    maxZ
+  });
+  if (pointCloudStatus.type === 'ok') {
+    pointCloudStatus.message = `已显示 ${pointCloud.value.count}/${sourceCount} 点`;
+  }
 }
 
 async function importXodr() {
@@ -4337,24 +4622,80 @@ async function importMapYaml() {
 async function uploadBackground() {
   const files = Array.from(bgFileInput.value?.files || []);
   if (!files.length) return;
-  for (const file of files) {
-    if (isYamlFile(file)) {
-      const yamlText = await file.text();
-      applyMapYamlText(yamlText, {
-        imageWidth: bgImage.value?.width || bgGeo.imageWidth || 0,
-        imageHeight: bgImage.value?.height || bgGeo.imageHeight || 0
-      });
-      continue;
+  try {
+    for (const file of files) {
+      if (isYamlFile(file)) {
+        const yamlText = await file.text();
+        applyMapYamlText(yamlText, {
+          imageWidth: bgImage.value?.width || bgGeo.imageWidth || 0,
+          imageHeight: bgImage.value?.height || bgGeo.imageHeight || 0
+        });
+        continue;
+      }
+      const imagePayload = await loadBackgroundFile(file);
+      bgImage.value = imagePayload;
+      bgGeo.imageWidth = Number(imagePayload.width || bgGeo.imageWidth || 0);
+      bgGeo.imageHeight = Number(imagePayload.height || bgGeo.imageHeight || 0);
     }
-    const dataUrl = await backgroundFileToDataUrl(file);
-    const img = await loadBackgroundImage(dataUrl);
-    bgImage.value = img;
-    bgGeo.imageWidth = Number(img.width || bgGeo.imageWidth || 0);
-    bgGeo.imageHeight = Number(img.height || bgGeo.imageHeight || 0);
+    fitView();
+    render();
+  } catch (error) {
+    const message = formatErrorMessage(error);
+    importStatus.message = `底图加载失败：${message}`;
+    importStatus.type = 'error';
+    window.alert(importStatus.message);
+  } finally {
+    bgFileInput.value.value = '';
   }
-  fitView();
-  render();
-  bgFileInput.value.value = '';
+}
+
+async function importPointCloud() {
+  const file = pointCloudFileInput.value?.files?.[0];
+  if (!file) return;
+  pointCloudStatus.message = `正在读取 ${file.name || '点云文件'}...`;
+  pointCloudStatus.type = 'loading';
+  pointCloudStatus.progress = 1;
+  try {
+    const buffer = await readFileBufferWithProgress(file, (progress) => {
+      pointCloudStatus.progress = progress;
+    });
+    pointCloudStatus.message = `正在解析 ${file.name || '点云文件'}...`;
+    pointCloudStatus.progress = Math.max(pointCloudStatus.progress, 78);
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+    const parsed = parsePointCloudBuffer(buffer, file.name, {
+      sampleRatio: 1,
+      minZ: -Infinity,
+      maxZ: Infinity
+    });
+    pointCloudStatus.message = `正在渲染点云 ${parsed.count} 点...`;
+    pointCloudStatus.progress = 92;
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+    rawPointCloud.value = markRaw({
+      ...parsed,
+      sourceCount: parsed.count
+    });
+    refreshPointCloudDisplay();
+    pointCloudStatus.progress = 100;
+    pointCloudStatus.message = `已显示 ${pointCloud.value?.count || 0}/${parsed.count} 点，请切换到3D查看`;
+    pointCloudStatus.type = 'ok';
+  } catch (error) {
+    rawPointCloud.value = null;
+    pointCloud.value = null;
+    pointCloudStatus.progress = 0;
+    pointCloudStatus.message = `点云解析失败：${formatErrorMessage(error)}`;
+    pointCloudStatus.type = 'error';
+    window.alert(pointCloudStatus.message);
+  } finally {
+    pointCloudFileInput.value.value = '';
+  }
+}
+
+function clearPointCloud() {
+  rawPointCloud.value = null;
+  pointCloud.value = null;
+  pointCloudStatus.message = '';
+  pointCloudStatus.type = '';
+  pointCloudStatus.progress = 0;
 }
 
 function handleCanvasClick(e) {
@@ -4672,13 +5013,21 @@ onBeforeUnmount(() => {
     fitView,
     runValidate,
     generateAndDownloadXodr,
+    downloadBackgroundOverlayImage,
     pickXodrFile,
     pickBgFile,
+    pickPointCloudFile,
     importStatus,
+    pointCloud,
+    pointCloudStatus,
+    pointCloudForm,
+    clearPointCloud,
+    bgImage,
     openRoadColorDialog,
     roads,
     selectedRoadIndex,
     formatNum,
+    formatPercent,
     getChildRoadEntries,
     hasChildRoadEntries,
     isRoadChildrenExpanded,
@@ -4699,9 +5048,11 @@ onBeforeUnmount(() => {
     xodrFileInput,
     mapYamlFileInput,
     bgFileInput,
+    pointCloudFileInput,
     importXodr,
     importMapYaml,
     uploadBackground,
+    importPointCloud,
     canvasWrap,
     canvasEl,
     mouseWorld,

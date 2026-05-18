@@ -25,9 +25,23 @@ kill_port() {
   fi
 }
 
-if [ ! -d "node_modules" ]; then
-  echo "[dev] node_modules 不存在，先安装依赖..."
-  npm install
+if ! has_cmd node; then
+  echo "[dev] 缺少 node，请先安装 Node.js（建议 18+），或运行: bash scripts/first-run-dev.sh"
+  exit 1
+fi
+
+if ! has_cmd npm; then
+  echo "[dev] 缺少 npm，请先安装 npm，或运行: bash scripts/first-run-dev.sh"
+  exit 1
+fi
+
+if [ ! -x "node_modules/.bin/vite" ]; then
+  echo "[dev] 未检测到 node_modules/.bin/vite，正在安装/修复前端依赖..."
+  if [ -f "package-lock.json" ]; then
+    npm install
+  else
+    npm install
+  fi
 fi
 
 if [ ! -x "native/bin/odr_json_parser" ]; then

@@ -11,6 +11,10 @@ const props = defineProps({
     type: Array,
     default: () => []
   },
+  pointCloud: {
+    type: Object,
+    default: null
+  },
   selectedRoadId: {
     type: String,
     default: ''
@@ -23,10 +27,12 @@ let renderer = null;
 let scene = null;
 let camera = null;
 let roadGroup = null;
+let pointCloudObject = null;
 let frame = 0;
 let resizeObserver = null;
 let dragging = false;
 let lastPointer = { x: 0, y: 0 };
+let spaceDown = false;
 let yaw = -0.72;
 let pitch = 0.88;
 let distance = 120;
@@ -34,6 +40,9 @@ let target = new THREE.Vector3(0, 0, 0);
 let pointerDown = { x: 0, y: 0 };
 const raycaster = new THREE.Raycaster();
 const pointerNdc = new THREE.Vector2();
+const MAX_RENDERED_POINT_COUNT = 800000;
+const MIN_CAMERA_PITCH = -1.45;
+const MAX_CAMERA_PITCH = 1.565;
 
 function roadMaterialState(roadId) {
   return {
@@ -85,27 +94,85 @@ function buildOffsetPath(points, offset) {
   return out;
 }
 
-function makeRoadMesh(road) {
-  const points = (Array.isArray(road?.points) ? road.points : []).map(finitePoint).filter(Boolean);
-  if (points.length < 2) return null;
-  const half = roadWidth(road) * 0.5;
-  const left = Array.isArray(road.nativeLeftBoundary) && road.nativeLeftBoundary.length > 1
-    ? road.nativeLeftBoundary.map(finitePoint).filter(Boolean)
-    : buildOffsetPath(points, half);
-  const right = Array.isArray(road.nativeRightBoundary) && road.nativeRightBoundary.length > 1
-    ? road.nativeRightBoundary.map(finitePoint).filter(Boolean)
-    : buildOffsetPath(points, -half);
+function cleanPointPath(points) {
+  return (Array.isArray(points) ? points : []).map(finitePoint).filter(Boolean);
+}
+
+function nativeLaneBoundaryMap(road) {
+  const out = new Map();
+  (Array.isArray(road?.nativeLaneBoundaries) ? road.nativeLaneBoundaries : []).forEach((lane) => {
+    const laneId = String(lane?.laneId ?? '').trim();
+    const points = cleanPointPath(lane?.points || lane);
+    if (laneId && points.length > 1) out.set(laneId, points);
+  });
+  return out;
+}
+
+function appendBandGeometry(positions, indices, left, right) {
   const n = Math.min(left.length, right.length);
-  if (n < 2) return null;
-  const positions = [];
-  const indices = [];
+  if (n < 2) return false;
+  const start = positions.length / 3;
   for (let i = 0; i < n; i += 1) {
     positions.push(left[i].x, 0, -left[i].y, right[i].x, 0, -right[i].y);
     if (i < n - 1) {
-      const base = i * 2;
+      const base = start + i * 2;
       indices.push(base, base + 1, base + 2, base + 1, base + 3, base + 2);
     }
   }
+  return true;
+}
+
+function buildNativeRoadBands(road, points) {
+  const laneMeshes = Array.isArray(road?.nativeLaneMeshes) ? road.nativeLaneMeshes : [];
+  const meshBands = laneMeshes
+    .map((mesh) => [cleanPointPath(mesh?.outer), cleanPointPath(mesh?.inner)])
+    .filter(([outer, inner]) => outer.length > 1 && inner.length > 1);
+  if (meshBands.length) return meshBands;
+
+  const bands = [];
+  const center = points;
+  const lanes = nativeLaneBoundaryMap(road);
+  const leftCount = Math.max(0, Number(road?.leftLaneCount || 0));
+  const rightCount = Math.max(0, Number(road?.rightLaneCount || 0));
+
+  let inner = center;
+  for (let i = 1; i <= leftCount; i += 1) {
+    const outer = lanes.get(String(i));
+    if (!outer) break;
+    bands.push([outer, inner]);
+    inner = outer;
+  }
+
+  inner = center;
+  for (let i = 1; i <= rightCount; i += 1) {
+    const outer = lanes.get(String(-i));
+    if (!outer) break;
+    bands.push([inner, outer]);
+    inner = outer;
+  }
+
+  if (bands.length) return bands;
+
+  const nativeLeft = cleanPointPath(road?.nativeLeftBoundary);
+  const nativeRight = cleanPointPath(road?.nativeRightBoundary);
+  if (nativeLeft.length > 1 && nativeRight.length > 1) return [[nativeLeft, nativeRight]];
+  if (nativeLeft.length > 1 && rightCount === 0) return [[nativeLeft, center]];
+  if (nativeRight.length > 1 && leftCount === 0) return [[center, nativeRight]];
+  return [];
+}
+
+function makeRoadMesh(road) {
+  const points = (Array.isArray(road?.points) ? road.points : []).map(finitePoint).filter(Boolean);
+  if (points.length < 2) return null;
+  let bands = buildNativeRoadBands(road, points);
+  if (!bands.length) {
+    const extents = roadLateralExtents(road);
+    bands = [[buildOffsetPath(points, extents.left), buildOffsetPath(points, -extents.right)]];
+  }
+  const positions = [];
+  const indices = [];
+  bands.forEach(([left, right]) => appendBandGeometry(positions, indices, left, right));
+  if (!indices.length) return null;
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
   geometry.setIndex(indices);
@@ -203,6 +270,93 @@ function clearRoadGroup() {
   scene.remove(roadGroup);
 }
 
+function clearPointCloudObject() {
+  if (!pointCloudObject) return;
+  if (pointCloudObject.geometry) pointCloudObject.geometry.dispose();
+  if (pointCloudObject.material) pointCloudObject.material.dispose();
+  scene?.remove(pointCloudObject);
+  pointCloudObject = null;
+}
+
+function makePointCloudObject(cloud) {
+  const packedPositions = cloud?.positions instanceof Float32Array ? cloud.positions : null;
+  const source = packedPositions ? null : (Array.isArray(cloud?.points) ? cloud.points : []);
+  const sourceCount = packedPositions ? Math.floor(packedPositions.length / 3) : source.length;
+  if (!sourceCount) return null;
+  const stride = Math.max(1, Math.ceil(sourceCount / MAX_RENDERED_POINT_COUNT));
+  const renderedCount = Math.ceil(sourceCount / stride);
+  const positions = new Float32Array(renderedCount * 3);
+  const packedColors = cloud?.colors instanceof Float32Array ? cloud.colors : null;
+  const objectColors = Array.isArray(cloud?.colors) && cloud.colors.length === sourceCount ? cloud.colors : null;
+  const hasColors = Boolean(packedColors || objectColors);
+  const colors = hasColors ? new Float32Array(renderedCount * 3) : null;
+  let out = 0;
+  for (let index = 0; index < sourceCount; index += stride) {
+    let x;
+    let y;
+    let z;
+    if (packedPositions) {
+      const base = index * 3;
+      x = packedPositions[base];
+      y = packedPositions[base + 1];
+      z = packedPositions[base + 2];
+    } else {
+      const point = source[index] || {};
+      x = Number(point.x);
+      y = Number(point.y);
+      z = Number(point.z);
+    }
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
+    positions[out] = x;
+    positions[out + 1] = z;
+    positions[out + 2] = -y;
+    if (colors) {
+      if (packedColors) {
+        const colorBase = index * 3;
+        colors[out] = packedColors[colorBase];
+        colors[out + 1] = packedColors[colorBase + 1];
+        colors[out + 2] = packedColors[colorBase + 2];
+      } else {
+        const color = objectColors[index] || {};
+        colors[out] = Number.isFinite(Number(color.r)) ? Number(color.r) : 0.72;
+        colors[out + 1] = Number.isFinite(Number(color.g)) ? Number(color.g) : 0.86;
+        colors[out + 2] = Number.isFinite(Number(color.b)) ? Number(color.b) : 1;
+      }
+    }
+    out += 3;
+  }
+  const finalPositions = out === positions.length ? positions : positions.slice(0, out);
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.BufferAttribute(finalPositions, 3));
+  if (colors) geometry.setAttribute('color', new THREE.BufferAttribute(out === colors.length ? colors : colors.slice(0, out), 3));
+  geometry.computeBoundingBox();
+  const pointSize = Math.max(0.01, Math.min(5, Number(cloud?.pointSize) || 0.18));
+  const hasVertexColors = Boolean(colors && colors.length);
+  const material = new THREE.PointsMaterial({
+    size: pointSize,
+    sizeAttenuation: true,
+    vertexColors: hasVertexColors,
+    color: 0x9ed8ff,
+    transparent: true,
+    opacity: 0.86,
+    depthWrite: false
+  });
+  const points = new THREE.Points(geometry, material);
+  points.name = 'point-cloud';
+  points.userData.sourceCount = sourceCount;
+  points.userData.renderedCount = Math.floor(out / 3);
+  points.renderOrder = 1;
+  return points;
+}
+
+function rebuildPointCloud() {
+  if (!scene) return;
+  clearPointCloudObject();
+  pointCloudObject = makePointCloudObject(props.pointCloud);
+  if (pointCloudObject) scene.add(pointCloudObject);
+  renderOnce();
+}
+
 function rebuildRoads() {
   if (!scene) return;
   clearRoadGroup();
@@ -240,6 +394,10 @@ function rebuildRoads() {
       if (laneLine) roadGroup.add(laneLine);
     });
   });
+  if (pointCloudObject) {
+    bounds.expandByObject(pointCloudObject);
+    hasBounds = true;
+  }
   scene.add(roadGroup);
   if (hasBounds) {
     bounds.getCenter(target);
@@ -252,7 +410,7 @@ function rebuildRoads() {
 
 function updateCamera() {
   if (!camera) return;
-  pitch = Math.max(0.2, Math.min(1.35, pitch));
+  pitch = Math.max(MIN_CAMERA_PITCH, Math.min(MAX_CAMERA_PITCH, pitch));
   distance = Math.max(8, Math.min(3000, distance));
   const cp = Math.cos(pitch);
   camera.position.set(
@@ -291,6 +449,19 @@ function onPointerMove(event) {
   const dx = event.clientX - lastPointer.x;
   const dy = event.clientY - lastPointer.y;
   lastPointer = { x: event.clientX, y: event.clientY };
+  if (spaceDown) {
+    const rect = hostEl.value?.getBoundingClientRect?.();
+    const viewportHeight = Math.max(1, Number(rect?.height || 1));
+    const panScale = (2 * distance * Math.tan(THREE.MathUtils.degToRad(camera.fov) * 0.5)) / viewportHeight;
+    const viewDir = new THREE.Vector3().subVectors(target, camera.position).normalize();
+    const right = new THREE.Vector3(-Math.sin(yaw), 0, Math.cos(yaw)).normalize();
+    const up = new THREE.Vector3().crossVectors(right, viewDir).normalize();
+    target.addScaledVector(right, dx * panScale);
+    target.addScaledVector(up, -dy * panScale);
+    updateCamera();
+    renderOnce();
+    return;
+  }
   yaw += dx * 0.008;
   pitch += dy * 0.006;
   updateCamera();
@@ -311,6 +482,18 @@ function onWheel(event) {
   distance *= event.deltaY > 0 ? 1.08 : 0.92;
   updateCamera();
   renderOnce();
+}
+
+function onKeyDown(event) {
+  if (event.code !== 'Space') return;
+  spaceDown = true;
+  event.preventDefault();
+}
+
+function onKeyUp(event) {
+  if (event.code !== 'Space') return;
+  spaceDown = false;
+  event.preventDefault();
 }
 
 function pickRoadAt(clientX, clientY) {
@@ -346,9 +529,12 @@ onMounted(() => {
   hostEl.value.addEventListener('pointerup', onPointerUp);
   hostEl.value.addEventListener('pointercancel', onPointerUp);
   hostEl.value.addEventListener('wheel', onWheel, { passive: false });
+  window.addEventListener('keydown', onKeyDown);
+  window.addEventListener('keyup', onKeyUp);
   resizeObserver = new ResizeObserver(resize);
   resizeObserver.observe(hostEl.value);
   resize();
+  rebuildPointCloud();
   rebuildRoads();
 });
 
@@ -362,7 +548,10 @@ onBeforeUnmount(() => {
     hostEl.value.removeEventListener('pointercancel', onPointerUp);
     hostEl.value.removeEventListener('wheel', onWheel);
   }
+  window.removeEventListener('keydown', onKeyDown);
+  window.removeEventListener('keyup', onKeyUp);
   clearRoadGroup();
+  clearPointCloudObject();
   renderer?.dispose();
 });
 
@@ -376,5 +565,10 @@ watch(() => props.roads, () => {
 
 watch(() => props.selectedRoadId, () => {
   applySelectedRoadStyle();
+});
+
+watch(() => props.pointCloud, () => {
+  rebuildPointCloud();
+  rebuildRoads();
 });
 </script>

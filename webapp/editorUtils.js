@@ -187,7 +187,7 @@ export function parseMapYamlText(text, fallback = {}) {
   };
 }
 
-export function parsePgmToDataUrl(arrayBuffer) {
+export function parsePgmToDataUrl(arrayBuffer, options = {}) {
   const bytes = new Uint8Array(arrayBuffer);
   let i = 0;
   const isSpace = (c) => c === 9 || c === 10 || c === 13 || c === 32;
@@ -224,28 +224,47 @@ export function parsePgmToDataUrl(arrayBuffer) {
   }
 
   skipWhitespaceAndComments();
-  const gray = new Uint8ClampedArray(width * height);
+  const maxPixels = Math.max(1, Number(options.maxPixels || width * height));
+  const maxSide = Math.max(1, Number(options.maxSide || Math.max(width, height)));
+  const pixelScale = Math.sqrt(maxPixels / Math.max(1, width * height));
+  const sideScale = maxSide / Math.max(width, height);
+  const scale = Math.min(1, pixelScale, sideScale);
+  const renderWidth = Math.max(1, Math.floor(width * scale));
+  const renderHeight = Math.max(1, Math.floor(height * scale));
+  const imageDataValues = new Uint8ClampedArray(renderWidth * renderHeight);
+  const setScaledValue = (sourceIndex, value) => {
+    if (scale >= 1) {
+      imageDataValues[sourceIndex] = value;
+      return;
+    }
+    const x = sourceIndex % width;
+    const y = Math.floor(sourceIndex / width);
+    const tx = Math.min(renderWidth - 1, Math.floor(x * scale));
+    const ty = Math.min(renderHeight - 1, Math.floor(y * scale));
+    imageDataValues[ty * renderWidth + tx] = value;
+  };
+
   if (magic === 'P5') {
     const expected = width * height;
     const body = bytes.slice(i, i + expected);
     if (body.length < expected) throw new Error('PGM 数据长度不足');
     for (let k = 0; k < expected; k += 1) {
-      gray[k] = Math.round((body[k] / maxVal) * 255);
+      setScaledValue(k, Math.round((body[k] / maxVal) * 255));
     }
   } else {
-    for (let k = 0; k < gray.length; k += 1) {
-      gray[k] = Math.round((Number(readToken()) / maxVal) * 255);
+    for (let k = 0; k < width * height; k += 1) {
+      setScaledValue(k, Math.round((Number(readToken()) / maxVal) * 255));
     }
   }
 
   const canvas = document.createElement('canvas');
-  canvas.width = width;
-  canvas.height = height;
+  canvas.width = renderWidth;
+  canvas.height = renderHeight;
   const pgmCtx = canvas.getContext('2d');
   if (!pgmCtx) throw new Error('无法创建 PGM 渲染上下文');
-  const imageData = pgmCtx.createImageData(width, height);
-  for (let p = 0; p < gray.length; p += 1) {
-    const v = gray[p];
+  const imageData = pgmCtx.createImageData(renderWidth, renderHeight);
+  for (let p = 0; p < imageDataValues.length; p += 1) {
+    const v = imageDataValues[p];
     const idx = p * 4;
     imageData.data[idx] = v;
     imageData.data[idx + 1] = v;
@@ -253,5 +272,11 @@ export function parsePgmToDataUrl(arrayBuffer) {
     imageData.data[idx + 3] = 255;
   }
   pgmCtx.putImageData(imageData, 0, 0);
-  return canvas.toDataURL('image/png');
+  return {
+    dataUrl: canvas.toDataURL('image/png'),
+    width,
+    height,
+    renderWidth,
+    renderHeight
+  };
 }

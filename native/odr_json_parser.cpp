@@ -277,6 +277,46 @@ int main(int argc, char** argv)
                 }
                 out << "]}";
             }
+            out << "],";
+
+            out << "\"nativeLaneMeshes\":[";
+            bool first_lane_mesh = true;
+            for (const auto& sec : sections)
+            {
+                const double s_start = sec.s0;
+                const double s_end = road.get_lanesection_end(sec);
+                const std::vector<odr::Lane> lanes = sec.get_lanes();
+                for (const auto& lane : lanes)
+                {
+                    if (lane.id == 0)
+                        continue;
+
+                    odr::Mesh3D lane_mesh = road.get_lane_mesh(lane, s_start, s_end, eps);
+                    if (lane_mesh.vertices.size() < 4)
+                        continue;
+
+                    if (!first_lane_mesh)
+                        out << ",";
+                    first_lane_mesh = false;
+                    out << "{\"laneId\":" << lane.id << ",\"outer\":[";
+                    for (size_t i = 0; i + 1 < lane_mesh.vertices.size(); i += 2)
+                    {
+                        const auto& p = lane_mesh.vertices[i];
+                        out << "{\"x\":" << p[0] << ",\"y\":" << p[1] << "}";
+                        if (i + 2 < lane_mesh.vertices.size())
+                            out << ",";
+                    }
+                    out << "],\"inner\":[";
+                    for (size_t i = 1; i < lane_mesh.vertices.size(); i += 2)
+                    {
+                        const auto& p = lane_mesh.vertices[i];
+                        out << "{\"x\":" << p[0] << ",\"y\":" << p[1] << "}";
+                        if (i + 2 < lane_mesh.vertices.size())
+                            out << ",";
+                    }
+                    out << "]}";
+                }
+            }
             out << "]";
 
             out << "}";
