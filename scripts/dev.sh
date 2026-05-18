@@ -37,9 +37,13 @@ fi
 
 if [ ! -x "node_modules/.bin/vite" ]; then
   echo "[dev] 未检测到 node_modules/.bin/vite，正在安装/修复前端依赖..."
-  if [ -f "package-lock.json" ]; then
-    npm install
-  else
+  if [ -d "node_modules" ]; then
+    chmod -R u+rwX node_modules >/dev/null 2>&1 || true
+    chmod +x node_modules/.bin/* node_modules/esbuild/bin/esbuild node_modules/@esbuild/*/bin/esbuild >/dev/null 2>&1 || true
+  fi
+  if ! npm install; then
+    echo "[dev] npm install 失败，尝试清理 esbuild 后重装..."
+    rm -rf node_modules/esbuild node_modules/@esbuild
     npm install
   fi
 fi

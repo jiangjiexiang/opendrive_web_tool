@@ -179,6 +179,7 @@ let ctx = null;
 let resizeObserver = null;
 let roadListResizeObserver = null;
 let renderFrame = 0;
+let pointCloudRefreshTimer = 0;
 let activeRenderCanvas = null;
 const roadListScrollTop = ref(0);
 const roadListViewportHeight = ref(320);
@@ -409,9 +410,10 @@ watch(
   () => detachImportedSource({ headerChanged: true })
 );
 
-watch(pointCloudForm, () => {
-  refreshPointCloudDisplay();
-}, { deep: true });
+watch(
+  () => [pointCloudForm.sampleRatio, pointCloudForm.minZ, pointCloudForm.maxZ],
+  () => schedulePointCloudFilterRefresh()
+);
 
 function formatNum(v, digits = 2) {
   const n = Number(v);
@@ -4529,7 +4531,7 @@ function filteredObjectPointCloud(source, ratio, minZ, maxZ) {
   };
 }
 
-function refreshPointCloudDisplay() {
+function refreshPointCloudDisplay(options = {}) {
   const source = rawPointCloud.value;
   if (!source) {
     pointCloud.value = null;
@@ -4538,6 +4540,14 @@ function refreshPointCloudDisplay() {
   const ratio = Math.max(1, Math.min(100, Number(pointCloudForm.sampleRatio) || 30)) / 100;
   const minZ = Number.isFinite(Number(pointCloudForm.minZ)) ? Number(pointCloudForm.minZ) : -Infinity;
   const maxZ = Number.isFinite(Number(pointCloudForm.maxZ)) ? Number(pointCloudForm.maxZ) : Infinity;
+  if (options.sizeOnly && pointCloud.value) {
+    pointCloud.value = markRaw({
+      ...pointCloud.value,
+      pointSize: Math.max(0.01, Number(pointCloudForm.pointSize) || 0.18)
+    });
+    return;
+  }
+
   const filtered = source.positions instanceof Float32Array
     ? filteredPackedPointCloud(source, ratio, minZ, maxZ)
     : filteredObjectPointCloud(source, ratio, minZ, maxZ);
@@ -4554,6 +4564,16 @@ function refreshPointCloudDisplay() {
   if (pointCloudStatus.type === 'ok') {
     pointCloudStatus.message = `已显示 ${pointCloud.value.count}/${sourceCount} 点`;
   }
+}
+
+function schedulePointCloudFilterRefresh() {
+  if (pointCloudRefreshTimer) {
+    window.clearTimeout(pointCloudRefreshTimer);
+  }
+  pointCloudRefreshTimer = window.setTimeout(() => {
+    pointCloudRefreshTimer = 0;
+    refreshPointCloudDisplay();
+  }, 160);
 }
 
 async function importXodr() {
@@ -4990,6 +5010,10 @@ onBeforeUnmount(() => {
   if (renderFrame) {
     cancelAnimationFrame(renderFrame);
     renderFrame = 0;
+  }
+  if (pointCloudRefreshTimer) {
+    window.clearTimeout(pointCloudRefreshTimer);
+    pointCloudRefreshTimer = 0;
   }
   if (canvasEl.value) {
     canvasEl.value.removeEventListener('click', handleCanvasClick);

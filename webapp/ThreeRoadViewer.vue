@@ -15,6 +15,10 @@ const props = defineProps({
     type: Object,
     default: null
   },
+  pointCloudSize: {
+    type: Number,
+    default: 0.18
+  },
   selectedRoadId: {
     type: String,
     default: ''
@@ -28,6 +32,7 @@ let scene = null;
 let camera = null;
 let roadGroup = null;
 let pointCloudObject = null;
+let gridObject = null;
 let frame = 0;
 let resizeObserver = null;
 let dragging = false;
@@ -43,6 +48,8 @@ const pointerNdc = new THREE.Vector2();
 const MAX_RENDERED_POINT_COUNT = 800000;
 const MIN_CAMERA_PITCH = -1.45;
 const MAX_CAMERA_PITCH = 1.565;
+const MIN_GRID_SIZE = 400;
+const MAX_GRID_DIVISIONS = 240;
 
 function roadMaterialState(roadId) {
   return {
@@ -278,6 +285,26 @@ function clearPointCloudObject() {
   pointCloudObject = null;
 }
 
+function rebuildGrid(bounds = null) {
+  if (!scene) return;
+  if (gridObject) {
+    scene.remove(gridObject);
+    gridObject.geometry?.dispose?.();
+    gridObject.material?.dispose?.();
+    gridObject = null;
+  }
+  let gridSize = MIN_GRID_SIZE;
+  if (bounds && !bounds.isEmpty()) {
+    const size = bounds.getSize(new THREE.Vector3());
+    gridSize = Math.max(MIN_GRID_SIZE, Math.ceil(Math.max(size.x, size.z) * 1.35 / 100) * 100);
+  }
+  const targetCellSize = gridSize > 2000 ? 50 : (gridSize > 900 ? 25 : 10);
+  const divisions = Math.max(20, Math.min(MAX_GRID_DIVISIONS, Math.round(gridSize / targetCellSize)));
+  gridObject = new THREE.GridHelper(gridSize, divisions, 0x4f7a70, 0x263b37);
+  gridObject.position.y = -0.025;
+  scene.add(gridObject);
+}
+
 function makePointCloudObject(cloud) {
   const packedPositions = cloud?.positions instanceof Float32Array ? cloud.positions : null;
   const source = packedPositions ? null : (Array.isArray(cloud?.points) ? cloud.points : []);
@@ -330,7 +357,7 @@ function makePointCloudObject(cloud) {
   geometry.setAttribute('position', new THREE.BufferAttribute(finalPositions, 3));
   if (colors) geometry.setAttribute('color', new THREE.BufferAttribute(out === colors.length ? colors : colors.slice(0, out), 3));
   geometry.computeBoundingBox();
-  const pointSize = Math.max(0.01, Math.min(5, Number(cloud?.pointSize) || 0.18));
+  const pointSize = Math.max(0.01, Math.min(5, Number(props.pointCloudSize) || Number(cloud?.pointSize) || 0.18));
   const hasVertexColors = Boolean(colors && colors.length);
   const material = new THREE.PointsMaterial({
     size: pointSize,
@@ -355,6 +382,14 @@ function rebuildPointCloud() {
   pointCloudObject = makePointCloudObject(props.pointCloud);
   if (pointCloudObject) scene.add(pointCloudObject);
   renderOnce();
+}
+
+function updatePointCloudSize() {
+  if (!pointCloudObject?.material) return false;
+  pointCloudObject.material.size = Math.max(0.01, Math.min(5, Number(props.pointCloudSize) || 0.18));
+  pointCloudObject.material.needsUpdate = true;
+  renderOnce();
+  return true;
 }
 
 function rebuildRoads() {
@@ -404,6 +439,7 @@ function rebuildRoads() {
     const size = bounds.getSize(new THREE.Vector3());
     distance = Math.max(30, Math.min(1800, Math.max(size.x, size.z) * 1.15));
   }
+  rebuildGrid(hasBounds ? bounds : null);
   updateCamera();
   renderOnce();
 }
@@ -520,9 +556,7 @@ onMounted(() => {
   const sun = new THREE.DirectionalLight(0xffddaa, 1.6);
   sun.position.set(80, 120, 60);
   scene.add(sun);
-  const grid = new THREE.GridHelper(400, 40, 0x3f5f58, 0x253331);
-  grid.position.y = -0.025;
-  scene.add(grid);
+  rebuildGrid();
 
   hostEl.value.addEventListener('pointerdown', onPointerDown);
   hostEl.value.addEventListener('pointermove', onPointerMove);
@@ -552,6 +586,12 @@ onBeforeUnmount(() => {
   window.removeEventListener('keyup', onKeyUp);
   clearRoadGroup();
   clearPointCloudObject();
+  if (gridObject) {
+    scene?.remove(gridObject);
+    gridObject.geometry?.dispose?.();
+    gridObject.material?.dispose?.();
+    gridObject = null;
+  }
   renderer?.dispose();
 });
 
@@ -569,6 +609,9 @@ watch(() => props.selectedRoadId, () => {
 
 watch(() => props.pointCloud, () => {
   rebuildPointCloud();
-  rebuildRoads();
+});
+
+watch(() => props.pointCloudSize, () => {
+  updatePointCloudSize();
 });
 </script>

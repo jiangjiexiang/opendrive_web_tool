@@ -41,24 +41,6 @@
           </div>
         </section>
       </div>
-      <div class="topbar-status">
-        <span class="status-chip">
-          <span class="status-label">模式</span>
-          <strong>{{ mode }}</strong>
-        </span>
-        <span class="status-chip">
-          <span class="status-label">道路</span>
-          <strong>{{ roads.length }}</strong>
-        </span>
-        <span class="status-chip">
-          <span class="status-label">选中</span>
-          <strong>{{ selectedRoad ? selectedRoad.id : '-' }}</strong>
-        </span>
-        <span class="status-chip">
-          <span class="status-label">点云</span>
-          <strong>{{ pointCloud ? formatNum(pointCloud.count, 0) : '-' }}</strong>
-        </span>
-      </div>
     </header>
 
     <aside class="sidebar left-rail">
@@ -187,6 +169,7 @@
           class="viewer-3d"
           :roads="roads"
           :point-cloud="pointCloud"
+          :point-cloud-size="pointCloudForm.pointSize"
           :selected-road-id="selectedRoad ? String(selectedRoad.id) : ''"
           @select-road="selectRoadById"
         />
@@ -205,7 +188,7 @@
         </div>
         <button type="button" class="rail-toggle-btn" @click="toggleRightPanel">收起</button>
       </div>
-      <section class="panel">
+      <section v-if="mode === 'draw'" class="panel">
         <h2>Header</h2>
         <div class="grid2">
           <label>name<input v-model="headerForm.name" /></label>
