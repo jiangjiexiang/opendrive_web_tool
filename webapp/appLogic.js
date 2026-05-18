@@ -38,6 +38,7 @@ const pointCloudFileInput = ref(null);
 
 const roads = ref([]);
 const selectedRoadIndex = ref(-1);
+const hoveredRoadIndex = ref(-1);
 const mode = ref('select');
 const drawingPoints = ref([]);
 const measurePoints = ref([]);
@@ -174,6 +175,12 @@ const ROAD_RENDER_CACHE = Symbol('roadRenderCache');
 const ROAD_BOUNDS_CACHE = Symbol('roadBoundsCache');
 const ROAD_LIST_ROW_HEIGHT = 56;
 const ROAD_LIST_OVERSCAN = 8;
+const VIRTUAL_ROAD_LIST_THRESHOLD = 120;
+const LARGE_MAP_TREE_THRESHOLD = 400;
+const LARGE_MAP_CHILD_INDEX_THRESHOLD = 800;
+const IMPORT_ROAD_CHUNK_SIZE = 120;
+const FIT_VIEW_MAX_ROAD_SAMPLES = 2400;
+const FIT_VIEW_MAX_POINTS_PER_ROAD = 48;
 
 let ctx = null;
 let resizeObserver = null;
@@ -218,7 +225,8 @@ const selectedRoadCode = computed(() => {
   if (importedRaw && !isDirty) return importedRaw;
   return selectedRoadToOpenDriveXml(road);
 });
-const useVirtualRoadList = computed(() => roads.value.length >= 500);
+const useVirtualRoadList = computed(() => roads.value.length >= VIRTUAL_ROAD_LIST_THRESHOLD);
+const useRoadTreeList = computed(() => roads.value.length < LARGE_MAP_TREE_THRESHOLD);
 const roadListWindowCount = computed(() => {
   const base = Math.ceil(Math.max(120, roadListViewportHeight.value) / ROAD_LIST_ROW_HEIGHT);
   return base + ROAD_LIST_OVERSCAN * 2;
@@ -248,6 +256,7 @@ const roadListBottomPadding = computed(() => {
   return Math.max(0, (roads.value.length - roadListEndIndex.value) * ROAD_LIST_ROW_HEIGHT);
 });
 const childRoadEntriesByParent = computed(() => {
+  if (roads.value.length > LARGE_MAP_CHILD_INDEX_THRESHOLD) return Object.create(null);
   const map = Object.create(null);
   roads.value.forEach((r, index) => {
     const rid = String(r.id ?? '');
@@ -737,9 +746,14 @@ function projectPointToRoadST(p, road) {
 
 function updateHoverRoadCoord(worldPoint) {
   const screenTolerance = 24 / Math.max(0.1, view.scale);
+  const viewportBounds = getViewportBounds(80);
+  const rejectMargin = screenTolerance + 12;
   let best = null;
   roads.value.forEach((road) => {
     if (road?.visible === false) return;
+    if (!roadNearWorldPoint(road, worldPoint, rejectMargin)) return;
+    const bounds = getRoadBounds(road);
+    if (bounds && viewportBounds && !boundsIntersect(bounds, viewportBounds)) return;
     const projected = projectPointToRoadST(worldPoint, road);
     if (!projected) return;
     if (!best || projected.distance < best.distance) best = projected;
@@ -793,44 +807,46 @@ function isPointInPolygon(point, polygon) {
 
 function pickRoad(worldPoint) {
   let best = { idx: -1, score: Infinity };
-  const nearMargin = 30 / Math.max(0.1, view.scale);
+  // clickPadding: minimum 5m or 22px worth, whichever is larger — makes clicking forgiving
+  const pxTolerance = 22;
+  const clickPadding = Math.max(5, pxTolerance / Math.max(0.1, view.scale));
+  const nearMargin = clickPadding + 16;
   roads.value.forEach((r, idx) => {
     if (r?.visible === false) return;
     if (!r.points || r.points.length < 2) return;
+    // Bounds-box pre-filter (cheap)
+    if (!roadNearWorldPoint(r, worldPoint, nearMargin)) return;
     const renderData = getRoadRenderData(r);
-    const bounds = renderData?.bounds || getRoadBounds(r);
-    if (bounds) {
-      if (worldPoint.x < bounds.minX - nearMargin || worldPoint.x > bounds.maxX + nearMargin
-        || worldPoint.y < bounds.minY - nearMargin || worldPoint.y > bounds.maxY + nearMargin) {
-        return;
-      }
-    }
+    // Use rendered centerRef for distance, fallback to raw points
     const centerLine = renderData?.centerRef?.length > 1 ? renderData.centerRef : r.points;
     const centerDist = distPointToPolyline(worldPoint, centerLine);
+    if (centerDist > nearMargin + 8) return;
     const firstProfile = getRoadProfileAtS(r, Number(r.points?.[0]?.s || 0));
     const lastProfile = getRoadProfileAtS(r, Number(r.points?.[r.points.length - 1]?.s || r.length || 0));
     const halfWidth = Math.max(
-      1.8,
+      2,
       Math.abs(firstProfile.leftBoundary - firstProfile.laneOffset),
       Math.abs(firstProfile.rightBoundary - firstProfile.laneOffset),
       Math.abs(lastProfile.leftBoundary - lastProfile.laneOffset),
       Math.abs(lastProfile.rightBoundary - lastProfile.laneOffset)
     );
-    const clickPadding = 14 / Math.max(0.1, view.scale);
     let score = centerDist - (halfWidth + clickPadding);
 
+    // Inside the rendered band polygon → highest priority
     const leftPath = renderData?.leftBoundary || [];
     const rightPath = renderData?.rightBoundary || [];
     if (leftPath.length >= 2 && rightPath.length >= 2) {
       const bandPolygon = leftPath.concat([...rightPath].reverse());
       if (isPointInPolygon(worldPoint, bandPolygon)) {
-        score = -2;
+        score = -100;
       }
     }
 
     if (score < best.score) best = { idx, score };
   });
-  return best.score <= 0 ? best.idx : -1;
+  // Accept if within the hit zone (score ≤ 0) or very close miss (≤ 1px world unit)
+  const missTolerance = 1 / Math.max(0.1, view.scale);
+  return best.score <= missTolerance ? best.idx : -1;
 }
 
 function drawPolyline(points, color, width, dashed = false, showPoints = false) {
@@ -1167,7 +1183,11 @@ const DEFAULT_ROAD_RENDER_STYLE = {
   selectedFill: 'rgba(0, 214, 255, 0.55)',
   selectedEdge: 'rgba(244, 253, 255, 1)',
   selectedLane: 'rgba(222, 247, 255, 0.96)',
-  selectedCenter: 'rgba(255, 244, 138, 1)'
+  selectedCenter: 'rgba(255, 244, 138, 1)',
+  hoveredFill: 'rgba(214, 161, 102, 0.38)',
+  hoveredEdge: 'rgba(241, 209, 170, 0.98)',
+  hoveredLane: 'rgba(230, 198, 160, 0.9)',
+  hoveredCenter: 'rgba(255, 232, 196, 1)'
 };
 
 function readRoadRenderCache(road) {
@@ -1402,6 +1422,57 @@ function boundsIntersect(a, b) {
   return !(a.maxX < b.minX || a.minX > b.maxX || a.maxY < b.minY || a.minY > b.maxY);
 }
 
+function yieldToMain() {
+  return new Promise((resolve) => {
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => resolve());
+    else window.setTimeout(resolve, 0);
+  });
+}
+
+function copyPointsLight(points) {
+  if (!Array.isArray(points) || !points.length) return [];
+  return points.map((p) => ({
+    x: Number(p.x),
+    y: Number(p.y),
+    s: Number(p.s),
+    hdg: Number(p.hdg)
+  }));
+}
+
+function copyBoundaryLight(points) {
+  if (!Array.isArray(points) || !points.length) return [];
+  return points.map((p) => ({ x: Number(p.x), y: Number(p.y) }));
+}
+
+function roadNearWorldPoint(road, worldPoint, marginM = 0) {
+  const bounds = getRoadBounds(road);
+  if (!bounds) return true;
+  return !(worldPoint.x < bounds.minX - marginM
+    || worldPoint.x > bounds.maxX + marginM
+    || worldPoint.y < bounds.minY - marginM
+    || worldPoint.y > bounds.maxY + marginM);
+}
+
+function forEachRoadPointSample(roadList, onPoint) {
+  const total = roadList.length;
+  if (!total) return;
+  const roadStep = total > FIT_VIEW_MAX_ROAD_SAMPLES
+    ? Math.ceil(total / FIT_VIEW_MAX_ROAD_SAMPLES)
+    : 1;
+  for (let ri = 0; ri < total; ri += roadStep) {
+    const road = roadList[ri];
+    if (road?.visible === false) continue;
+    const pts = road.points || [];
+    if (!pts.length) continue;
+    const pointStep = pts.length > FIT_VIEW_MAX_POINTS_PER_ROAD
+      ? Math.ceil(pts.length / FIT_VIEW_MAX_POINTS_PER_ROAD)
+      : 1;
+    for (let pi = 0; pi < pts.length; pi += pointStep) {
+      onPoint(pts[pi]);
+    }
+  }
+}
+
 function shouldDrawRoadLabels(visibleRoadCount) {
   return view.scale >= 0.65 && visibleRoadCount <= 220;
 }
@@ -1416,8 +1487,14 @@ function shouldUseOverviewRoadRendering(visibleRoadCount, visiblePointCount) {
 
 function drawRoadSurface(road, selected, renderData = null, options = {}) {
   if (!road.points || road.points.length < 2) return;
+  const hovered = Boolean(options.hovered);
+  const emphasized = selected || hovered;
+  const edgeWidth = selected ? 2.2 : (hovered ? 2 : 1.6);
+  const laneWidth = selected ? 1.4 : (hovered ? 1.2 : 1);
+  const centerWidth = selected ? 2.8 : (hovered ? 2.2 : 1.6);
+  const overviewWidth = selected ? 2.2 : (hovered ? 1.8 : 1.2);
   if (options.overview) {
-    const overviewColor = options.palette?.center || (selected ? 'rgba(255, 244, 138, 0.98)' : 'rgba(120, 208, 255, 0.88)');
+    const overviewColor = options.palette?.center || (emphasized ? 'rgba(255, 244, 138, 0.98)' : 'rgba(120, 208, 255, 0.88)');
     const centerRef = options.allowFallbackCenterline
       ? (road.points || [])
       : (renderData?.centerRef || getRoadRenderData(road)?.centerRef || []);
@@ -1425,7 +1502,7 @@ function drawRoadSurface(road, selected, renderData = null, options = {}) {
     drawPolyline(
       centerRef,
       overviewColor,
-      selected ? 2.2 : 1.2
+      overviewWidth
     );
     return;
   }
@@ -1438,7 +1515,14 @@ function drawRoadSurface(road, selected, renderData = null, options = {}) {
         lane: DEFAULT_ROAD_RENDER_STYLE.selectedLane,
         center: DEFAULT_ROAD_RENDER_STYLE.selectedCenter
       }
-    : {
+    : hovered
+      ? {
+          fill: DEFAULT_ROAD_RENDER_STYLE.hoveredFill,
+          edge: DEFAULT_ROAD_RENDER_STYLE.hoveredEdge,
+          lane: DEFAULT_ROAD_RENDER_STYLE.hoveredLane,
+          center: DEFAULT_ROAD_RENDER_STYLE.hoveredCenter
+        }
+      : {
         fill: DEFAULT_ROAD_RENDER_STYLE.baseFill,
         edge: DEFAULT_ROAD_RENDER_STYLE.baseEdge,
         lane: DEFAULT_ROAD_RENDER_STYLE.baseLane,
@@ -1453,27 +1537,27 @@ function drawRoadSurface(road, selected, renderData = null, options = {}) {
   }
 
   if (resolvedRenderData.hasNativeBoundaries) {
-    drawPolyline(resolvedRenderData.leftBoundary, palette.edge, selected ? 2.2 : 1.6);
-    drawPolyline(resolvedRenderData.rightBoundary, palette.edge, selected ? 2.2 : 1.6);
-    if (options.showLaneMarkings || selected) {
+    drawPolyline(resolvedRenderData.leftBoundary, palette.edge, edgeWidth);
+    drawPolyline(resolvedRenderData.rightBoundary, palette.edge, edgeWidth);
+    if (options.showLaneMarkings || emphasized) {
       resolvedRenderData.laneBoundaries.forEach((lane) => {
-        if (lane?.points?.length > 1) drawPolyline(lane.points, palette.lane, selected ? 1.4 : 1, true);
+        if (lane?.points?.length > 1) drawPolyline(lane.points, palette.lane, laneWidth, true);
       });
     }
-    if (!options.suppressCenterline || selected) {
-      drawPolyline(resolvedRenderData.centerRef, palette.center, selected ? 2.4 : 1.2, true);
+    if (!options.suppressCenterline || emphasized) {
+      drawPolyline(resolvedRenderData.centerRef, palette.center, selected ? 2.4 : (hovered ? 2 : 1.2), true);
     }
     return;
   }
-  drawPolyline(resolvedRenderData.leftBoundary, palette.edge, selected ? 2.2 : 1.6);
-  drawPolyline(resolvedRenderData.rightBoundary, palette.edge, selected ? 2.2 : 1.6);
-  if (options.showLaneMarkings || selected) {
+  drawPolyline(resolvedRenderData.leftBoundary, palette.edge, edgeWidth);
+  drawPolyline(resolvedRenderData.rightBoundary, palette.edge, edgeWidth);
+  if (options.showLaneMarkings || emphasized) {
     resolvedRenderData.laneBoundaries.forEach((lane) => {
-      if (lane?.points?.length > 1) drawPolyline(lane.points, palette.lane, selected ? 1.4 : 1, true);
+      if (lane?.points?.length > 1) drawPolyline(lane.points, palette.lane, laneWidth, true);
     });
   }
-  if (!options.suppressCenterline || selected) {
-    drawPolyline(resolvedRenderData.centerRef, palette.center, selected ? 2.8 : 1.6, true);
+  if (!options.suppressCenterline || emphasized) {
+    drawPolyline(resolvedRenderData.centerRef, palette.center, centerWidth, true);
   }
 }
 
@@ -1782,8 +1866,7 @@ function performRender(options = {}) {
   let visiblePointCount = 0;
   roads.value.forEach((r, idx) => {
     if (r?.visible === false) return;
-    const renderData = getRoadRenderData(r);
-    const bounds = renderData?.bounds || getRoadBounds(r);
+    const bounds = getRoadBounds(r);
     if (bounds && viewportBounds && !boundsIntersect(bounds, viewportBounds)) return;
     visibleRoads.push({ road: r, idx });
     visiblePointCount += Array.isArray(r.points) ? r.points.length : 0;
@@ -1793,13 +1876,20 @@ function performRender(options = {}) {
   const overviewMode = shouldUseOverviewRoadRendering(visibleRoads.length, visiblePointCount);
   const suppressCenterline = exportMode ? false : (!overviewMode && (view.scale < 1.1 || visibleRoads.length > 220));
   const showLaneMarkings = exportMode ? visibleRoads.length <= 600 : (!overviewMode && view.scale >= 1.25 && visibleRoads.length <= 160);
-  visibleRoads.forEach(({ road: r, idx }) => {
+  const drawRoadEntry = (entry, pass) => {
+    const { road: r, idx } = entry;
     const sel = idx === selectedRoadIndex.value;
-    const needDetail = !overviewMode || sel || drawArrows || drawLabels;
+    const hov = idx === hoveredRoadIndex.value && !sel;
+    if (pass === 'base' && (sel || hov)) return;
+    if (pass === 'hover' && !hov) return;
+    if (pass === 'selected' && !sel) return;
+    const emphasized = sel || hov;
+    const needDetail = !overviewMode || emphasized || drawArrows || drawLabels;
     const renderData = needDetail ? getRoadRenderData(r) : null;
-    const palette = computeRoadPaletteForRoad(r, sel, roadColorConfig, DEFAULT_ROAD_RENDER_STYLE);
+    const palette = computeRoadPaletteForRoad(r, sel, hov, roadColorConfig, DEFAULT_ROAD_RENDER_STYLE);
     drawRoadSurface(r, sel, renderData, {
-      overview: overviewMode && !sel,
+      overview: overviewMode && !emphasized,
+      hovered: hov,
       allowFallbackCenterline: true,
       suppressCenterline,
       showLaneMarkings,
@@ -1816,6 +1906,9 @@ function performRender(options = {}) {
       ctx.font = '12px sans-serif';
       ctx.fillText(`R${r.id}`, p.x + 7, p.y - 6);
     }
+  };
+  ['base', 'hover', 'selected'].forEach((pass) => {
+    visibleRoads.forEach((entry) => drawRoadEntry(entry, pass));
   });
   if (!exportMode) {
     drawDraftRoadPreview();
@@ -1893,14 +1986,11 @@ function fitView() {
     view.offsetY = margin + maxY * view.scale + (canvasEl.value.height - margin * 2 - h * view.scale) / 2;
   } else if (roads.value.length) {
     let minX = Infinity; let minY = Infinity; let maxX = -Infinity; let maxY = -Infinity;
-    roads.value.forEach((r) => {
-      if (r?.visible === false) return;
-      (r.points || []).forEach((p) => {
-        if (p.x < minX) minX = p.x;
-        if (p.y < minY) minY = p.y;
-        if (p.x > maxX) maxX = p.x;
-        if (p.y > maxY) maxY = p.y;
-      });
+    forEachRoadPointSample(roads.value, (p) => {
+      if (p.x < minX) minX = p.x;
+      if (p.y < minY) minY = p.y;
+      if (p.x > maxX) maxX = p.x;
+      if (p.y > maxY) maxY = p.y;
     });
     if (Number.isFinite(minX)) {
       const w = Math.max(1, maxX - minX);
@@ -3787,6 +3877,13 @@ function completeExtend(toPoint) {
 }
 
 function setMode(next) {
+  if (mode.value === 'draw' && next !== 'draw' && drawingPoints.value.length > 0) {
+    if (drawingPoints.value.length >= 2) {
+      finishRoad();
+    } else {
+      drawingPoints.value = [];
+    }
+  }
   mode.value = next;
   if (next === 'junction') {
     drawForm.autoJunction = true;
@@ -3802,6 +3899,23 @@ function setMode(next) {
 function selectRoad(i, options = {}) {
   selectedRoadIndex.value = i;
   if (options.center) centerViewOnRoad(i);
+  render();
+}
+
+function setHoveredRoadIndex(index) {
+  const next = Number(index);
+  if (!Number.isFinite(next) || next < 0) {
+    clearHoveredRoadIndex();
+    return;
+  }
+  if (hoveredRoadIndex.value === next) return;
+  hoveredRoadIndex.value = next;
+  render();
+}
+
+function clearHoveredRoadIndex() {
+  if (hoveredRoadIndex.value < 0) return;
+  hoveredRoadIndex.value = -1;
   render();
 }
 
@@ -3950,6 +4064,13 @@ function undoPoint() {
   render();
 }
 
+function clearMeasure() {
+  if (!measurePoints.value.length) return;
+  measurePoints.value = [];
+  measureHoverPoint.value = null;
+  render();
+}
+
 function deleteRoad() {
   if (selectedRoadIndex.value < 0) return;
   endpointDrag.value = null;
@@ -3973,6 +4094,81 @@ function deleteRoad() {
     synchronizeTopologyAfterRoadRemoval(removedId);
   }
   selectedRoadIndex.value = -1;
+  render();
+}
+
+function deleteLaneFromRoad(laneIdStr) {
+  const road = selectedRoad.value;
+  if (!road) return;
+  const laneId = Number(laneIdStr);
+  if (!Number.isFinite(laneId) || laneId === 0) return;
+
+  detachImportedSource({ roadIds: [String(road.id)] });
+
+  const isLeft = laneId > 0;
+  const absId = Math.abs(laneId);
+
+  if (isLeft) {
+    if ((road.leftLaneCount || 0) < 1) return;
+    if (Array.isArray(road.nativeLaneMeshes)) {
+      road.nativeLaneMeshes = road.nativeLaneMeshes
+        .filter((m) => Number(m.laneId) !== laneId)
+        .map((m) => {
+          const mid = Number(m.laneId);
+          if (mid > absId) return { ...m, laneId: mid - 1 };
+          return m;
+        });
+    }
+    [road.laneSectionsSpec, road.laneSections].forEach((sections) => {
+      if (!Array.isArray(sections)) return;
+      sections.forEach((section) => {
+        if (!Array.isArray(section.leftLanes)) return;
+        section.leftLanes = section.leftLanes
+          .filter((lane) => Number(lane.id) !== laneId)
+          .map((lane) => {
+            const lid = Number(lane.id);
+            return lid > absId ? { ...lane, id: lid - 1 } : lane;
+          });
+        section.leftLaneCount = section.leftLanes.length;
+      });
+    });
+    road.leftLaneCount = Math.max(0, (road.leftLaneCount || 0) - 1);
+  } else {
+    if ((road.rightLaneCount || 0) < 1) return;
+    if (Array.isArray(road.nativeLaneMeshes)) {
+      road.nativeLaneMeshes = road.nativeLaneMeshes
+        .filter((m) => Number(m.laneId) !== laneId)
+        .map((m) => {
+          const mid = Number(m.laneId);
+          if (mid < laneId) return { ...m, laneId: mid + 1 };
+          return m;
+        });
+    }
+    [road.laneSectionsSpec, road.laneSections].forEach((sections) => {
+      if (!Array.isArray(sections)) return;
+      sections.forEach((section) => {
+        if (!Array.isArray(section.rightLanes)) return;
+        section.rightLanes = section.rightLanes
+          .filter((lane) => Number(lane.id) !== laneId)
+          .map((lane) => {
+            const lid = Number(lane.id);
+            return lid < laneId ? { ...lane, id: lid + 1 } : lane;
+          });
+        section.rightLaneCount = section.rightLanes.length;
+      });
+    });
+    road.rightLaneCount = Math.max(0, (road.rightLaneCount || 0) - 1);
+  }
+
+  if (Array.isArray(road.nativeLaneBoundaries)) {
+    road.nativeLaneBoundaries = [];
+  }
+
+  roadForm.leftLaneCount = road.leftLaneCount;
+  roadForm.rightLaneCount = road.rightLaneCount;
+  roadForm.laneLinks = laneLinkRowsForRoadForm(road);
+
+  applyRoadShape(road, getRoadEditPoints(road));
   render();
 }
 
@@ -4365,8 +4561,9 @@ function applyHeaderFromXodr(xmlText) {
   if (Number.isFinite(parsed.west)) headerForm.west = parsed.west;
 }
 
-function applyNativeRoads(parsedRoads, importedJunctions = [], importedRoadDetails = {}) {
-  const normalized = (parsedRoads || []).map((r, idx) => ({
+function normalizeImportedRoad(r, idx, importedRoadDetails = {}) {
+  const points = copyPointsLight(Array.isArray(r.points) ? r.points : []);
+  const road = {
     id: String(r.id ?? idx + 1),
     junction: String(r.junction ?? '-1'),
     leftLaneCount: Math.max(0, Number(r.leftLaneCount || 0)),
@@ -4384,26 +4581,19 @@ function applyNativeRoads(parsedRoads, importedJunctions = [], importedRoadDetai
     laneOffsetRecords: [{ sOffset: 0, a: 0, b: 0, c: 0, d: 0 }],
     laneSections: [],
     editPoints: Array.isArray(r.editPoints) && r.editPoints.length >= 2
-      ? r.editPoints.map((p) => ({ x: Number(p.x), y: Number(p.y) }))
-      : defaultEditPoints(Array.isArray(r.points) && r.points.length >= 2
-        ? [r.points[0], r.points[r.points.length - 1]]
-        : r.points),
-    points: Array.isArray(r.points) ? r.points.map((p) => ({ x: Number(p.x), y: Number(p.y), s: Number(p.s), hdg: Number(p.hdg) })) : [],
-    nativeLeftBoundary: Array.isArray(r.nativeLeftBoundary) ? r.nativeLeftBoundary.map((p) => ({ x: Number(p.x), y: Number(p.y) })) : [],
-    nativeRightBoundary: Array.isArray(r.nativeRightBoundary) ? r.nativeRightBoundary.map((p) => ({ x: Number(p.x), y: Number(p.y) })) : [],
+      ? copyBoundaryLight(r.editPoints)
+      : defaultEditPoints(points.length >= 2 ? [points[0], points[points.length - 1]] : points),
+    points,
+    nativeLeftBoundary: copyBoundaryLight(Array.isArray(r.nativeLeftBoundary) ? r.nativeLeftBoundary : []),
+    nativeRightBoundary: copyBoundaryLight(Array.isArray(r.nativeRightBoundary) ? r.nativeRightBoundary : []),
     nativeLaneBoundaries: Array.isArray(r.nativeLaneBoundaries) ? r.nativeLaneBoundaries : [],
-    nativeLaneMeshes: Array.isArray(r.nativeLaneMeshes) ? r.nativeLaneMeshes.map((mesh) => ({
-      laneId: String(mesh?.laneId ?? ''),
-      outer: Array.isArray(mesh?.outer) ? mesh.outer.map((p) => ({ x: Number(p.x), y: Number(p.y) })) : [],
-      inner: Array.isArray(mesh?.inner) ? mesh.inner.map((p) => ({ x: Number(p.x), y: Number(p.y) })) : []
-    })) : [],
+    nativeLaneMeshes: Array.isArray(r.nativeLaneMeshes) ? r.nativeLaneMeshes : [],
     visible: r.visible !== false,
-    length: Number.isFinite(Number(r.length)) ? Number(r.length) : polylineLength(r.points || [])
-  }));
-  normalized.forEach((road) => {
-    const rid = String(road.id);
-    const detail = importedRoadDetails[rid];
-    if (!detail) return;
+    length: Number.isFinite(Number(r.length)) ? Number(r.length) : polylineLength(points)
+  };
+  const rid = String(road.id);
+  const detail = importedRoadDetails[rid];
+  if (detail) {
     road.predecessorType = detail.predecessorType || road.predecessorType;
     road.predecessorId = String(detail.predecessorId || road.predecessorId || '');
     road.predecessorContactPoint = detail.predecessorContactPoint || road.predecessorContactPoint;
@@ -4422,14 +4612,32 @@ function applyNativeRoads(parsedRoads, importedJunctions = [], importedRoadDetai
       }));
       road.leftLaneCount = Math.max(road.leftLaneCount, ...road.laneSections.map((section) => section.leftLanes.length));
       road.rightLaneCount = Math.max(road.rightLaneCount, ...road.laneSections.map((section) => section.rightLanes.length));
-    }
-    if (Array.isArray(detail.laneSectionsSpec) && detail.laneSectionsSpec.length) {
       road.laneSectionsSpec = detail.laneSectionsSpec.map((section) => ({
         ...section,
         laneLinks: { ...(section?.laneLinks || {}) }
       }));
     }
-  });
+  }
+  getRoadBounds(road);
+  return road;
+}
+
+async function applyNativeRoads(parsedRoads, importedJunctions = [], importedRoadDetails = {}) {
+  const source = Array.isArray(parsedRoads) ? parsedRoads : [];
+  const total = source.length;
+  const normalized = new Array(total);
+  for (let start = 0; start < total; start += IMPORT_ROAD_CHUNK_SIZE) {
+    const end = Math.min(total, start + IMPORT_ROAD_CHUNK_SIZE);
+    for (let i = start; i < end; i += 1) {
+      normalized[i] = normalizeImportedRoad(source[i], i, importedRoadDetails);
+    }
+    if (importStatus.type === 'loading') {
+      importStatus.message = total > IMPORT_ROAD_CHUNK_SIZE
+        ? `正在加载道路数据 ${end}/${total}...`
+        : '正在加载道路数据...';
+    }
+    if (end < total) await yieldToMain();
+  }
   roads.value = normalized;
   if (normalized.length > 500) {
     roadColorConfig.showRoadLabels = false;
@@ -4440,7 +4648,10 @@ function applyNativeRoads(parsedRoads, importedJunctions = [], importedRoadDetai
   junctionMeshes.value = [];
   selectedRoadIndex.value = normalized.length ? 0 : -1;
   fitView();
-  render();
+  if (normalized.length > 800) {
+    view.scale = Math.min(view.scale, 0.45);
+  }
+  render(true);
 }
 
 function pickXodrFile() {
@@ -4594,17 +4805,18 @@ async function importXodr() {
     if (Number.isFinite(parsedHeader.south)) headerForm.south = parsedHeader.south;
     if (Number.isFinite(parsedHeader.east)) headerForm.east = parsedHeader.east;
     if (Number.isFinite(parsedHeader.west)) headerForm.west = parsedHeader.west;
-    const { details, rawRoads } = parsedBundle?.roadDetails || parseRoadDetailsFromXodr(text);
-    const { specs: parsedJunctions, rawById } = parsedBundle?.junctions || parseJunctionSpecsFromXodr(text);
-    const extras = parsedBundle?.extras || parseOpenDriveExtrasFromXodr(text);
+    const { details, rawRoads } = parsedBundle.roadDetails;
+    const { specs: parsedJunctions, rawById } = parsedBundle.junctions;
+    const extras = parsedBundle.extras;
     rawRoadXmlById.value = rawRoads;
     rawJunctionXmlById.value = rawById;
     rawOpenDriveExtras.value = extras;
     dirtyRoadIds.value = {};
     dirtyJunctionIds.value = {};
     headerDirty.value = false;
+    importStatus.message = '正在解析道路几何（服务端）...';
     const payload = await postJson('/api/import-xodr-native', { xml: text, eps: 0.2 });
-    applyNativeRoads(payload.roads || [], parsedJunctions, details);
+    await applyNativeRoads(payload.roads || [], parsedJunctions, details);
     importedXodrText.value = text;
     lastXodr.value = '';
     const roadCount = Array.isArray(payload.roads) ? payload.roads.length : roads.value.length;
@@ -4916,6 +5128,10 @@ function isEditableElement(target) {
 function handleKeyDown(e) {
   if (!isEditableElement(e.target) && e.key === 'Escape') {
     e.preventDefault();
+    if (measurePoints.value.length > 0) {
+      clearMeasure();
+      return;
+    }
     setMode('select');
     render();
     return;
@@ -5033,6 +5249,7 @@ onBeforeUnmount(() => {
     setMode,
     finishRoad,
     undoPoint,
+    clearMeasure,
     deleteRoad,
     fitView,
     runValidate,
@@ -5050,6 +5267,9 @@ onBeforeUnmount(() => {
     openRoadColorDialog,
     roads,
     selectedRoadIndex,
+    hoveredRoadIndex,
+    setHoveredRoadIndex,
+    clearHoveredRoadIndex,
     formatNum,
     formatPercent,
     getChildRoadEntries,
@@ -5066,6 +5286,7 @@ onBeforeUnmount(() => {
     roadListEl,
     handleRoadListScroll,
     useVirtualRoadList,
+    useRoadTreeList,
     virtualRoadRows,
     roadListTopPadding,
     roadListBottomPadding,
@@ -5106,6 +5327,7 @@ onBeforeUnmount(() => {
     clearJunctionDraft,
     roadForm,
     applySelectedRoad,
+    deleteLaneFromRoad,
     applySelectedRoadCode,
     validateDialog
   };

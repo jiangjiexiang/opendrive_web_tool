@@ -76,13 +76,21 @@ function isJunctionRoad(road) {
   return String(road?.junction ?? '-1') !== '-1';
 }
 
-export function getRoadPaletteForRoad(road, selected, roadColorConfig, defaultRoadRenderStyle) {
+export function getRoadPaletteForRoad(road, selected, hovered, roadColorConfig, defaultRoadRenderStyle) {
   if (selected) {
     return {
       fill: defaultRoadRenderStyle.selectedFill,
       edge: defaultRoadRenderStyle.selectedEdge,
       lane: defaultRoadRenderStyle.selectedLane,
       center: defaultRoadRenderStyle.selectedCenter
+    };
+  }
+  if (hovered) {
+    return {
+      fill: defaultRoadRenderStyle.hoveredFill,
+      edge: defaultRoadRenderStyle.hoveredEdge,
+      lane: defaultRoadRenderStyle.hoveredLane,
+      center: defaultRoadRenderStyle.hoveredCenter
     };
   }
   const color = isJunctionRoad(road) ? roadColorConfig.junctionColor : roadColorConfig.allColor;

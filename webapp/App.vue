@@ -1,61 +1,136 @@
 <template>
-  <main class="layout" :class="{ 'left-collapsed': leftPanelCollapsed, 'right-collapsed': rightPanelCollapsed }">
-    <header class="topbar">
+  <main class="layout layout-immersive" :class="{ 'left-collapsed': leftPanelCollapsed, 'right-collapsed': rightPanelCollapsed }">
+    <section class="viewer center-stage">
+      <div class="stage-shell">
+        <div ref="canvasWrap" class="canvas-wrap" :class="{ 'is-hidden-viewer': viewerMode !== '2d' }">
+          <canvas ref="canvasEl" class="canvas-el" width="1280" height="720" />
+        </div>
+        <ThreeRoadViewer
+          v-if="viewerMode === '3d'"
+          class="viewer-3d"
+          :roads="roads"
+          :point-cloud="pointCloud"
+          :point-cloud-size="pointCloudForm.pointSize"
+          :selected-road-id="selectedRoad ? String(selectedRoad.id) : ''"
+          @select-road="selectRoadById"
+        />
+      </div>
+      <div class="hud-metrics stage-metrics">
+        <span>坐标 x={{ formatNum(mouseWorld.x, 2) }}</span>
+        <span>坐标 y={{ formatYUp(mouseWorld.y) }}</span>
+        <span>yaw={{ formatNum(bgGeo.yaw, 3) }}</span>
+        <span v-if="measureStats.pointCount">测距 点={{ measureStats.pointCount }} | 段={{ measureStats.segmentCount }} | 总长={{ formatNum(measureStats.total, 3) }}m</span>
+        <span v-if="viewerMode === '2d' && hoverRoadCoord.roadId">Road {{ hoverRoadCoord.roadId }} | Lane {{ hoverRoadCoord.laneId || '-' }} | s={{ formatNum(hoverRoadCoord.s, 2) }} | t={{ formatNum(hoverRoadCoord.t, 2) }}</span>
+      </div>
+      <div class="stage-tip">
+        左键交互，滚轮缩放，空格+拖动平移；测距：左键加点，撤销/Backspace 删上一点，左侧列表可查看并清除
+        | 原点: x={{ formatNum(bgGeo.originX, 2) }}, y={{ formatYUp(bgGeo.originY) }}, yaw={{ formatNum(bgGeo.yaw, 3) }}
+      </div>
+    </section>
+
+    <header class="topbar overlay-panel">
       <div class="toolbar-strip">
         <section class="tool-cluster">
           <span class="cluster-label">模式</span>
           <div class="toolbar-group">
-            <button type="button" class="mode-btn" :class="{ active: viewerMode === '2d' }" @click="setViewerMode('2d')">2D画图</button>
-            <button type="button" class="mode-btn" :class="{ active: viewerMode === '3d' }" @click="setViewerMode('3d')">3D查看</button>
+            <button type="button" class="mode-btn" :class="{ active: viewerMode === '2d' }" @click="setViewerMode('2d')">2D</button>
+            <button type="button" class="mode-btn" :class="{ active: viewerMode === '3d' }" @click="setViewerMode('3d')">3D</button>
             <button type="button" class="mode-btn" :class="{ active: mode === 'draw' }" @click="setMode('draw')">绘制</button>
             <button type="button" class="mode-btn" :class="{ active: mode === 'select' }" @click="setMode('select')">选择</button>
             <button type="button" class="mode-btn" :class="{ active: mode === 'measure' }" @click="setMode('measure')">测距</button>
-            <button type="button" class="mode-btn" :class="{ active: mode === 'connect' }" @click="setMode('connect')">生成弯道</button>
+            <button type="button" class="mode-btn" :class="{ active: mode === 'connect' }" @click="setMode('connect')">弯道</button>
             <button type="button" class="mode-btn" :class="{ active: mode === 'extend' }" @click="setMode('extend')">延伸</button>
-            <button type="button" class="mode-btn" :class="{ active: mode === 'junction' }" @click="setMode('junction')">自动生成junction</button>
+            <button type="button" class="mode-btn" :class="{ active: mode === 'junction' }" @click="setMode('junction')">路口</button>
           </div>
         </section>
         <section class="tool-cluster">
           <span class="cluster-label">编辑</span>
           <div class="toolbar-group">
-            <button type="button" @click="finishRoad">完成道路</button>
-            <button type="button" @click="undoPoint">撤销点</button>
-            <button type="button" @click="deleteRoad">删除选中</button>
-            <button type="button" @click="fitView">适配视图</button>
+            <button type="button" @click="finishRoad">完成</button>
+            <button type="button" @click="undoPoint">撤销</button>
+            <button type="button" @click="deleteRoad">删除</button>
+            <button type="button" @click="fitView">适配</button>
           </div>
         </section>
         <section class="tool-cluster">
-          <span class="cluster-label">数据</span>
+          <span class="cluster-label">XODR</span>
           <div class="toolbar-group">
             <button type="button" @click="runValidate">质检</button>
-            <button type="button" @click="generateAndDownloadXodr">生成并下载XODR</button>
+            <button type="button" @click="generateAndDownloadXodr">生成</button>
             <button type="button" :disabled="importStatus.loading" @click="pickXodrFile">
-              {{ importStatus.loading ? '导入中...' : '导入XODR' }}
+              {{ importStatus.loading ? '导入中…' : '导入' }}
             </button>
-            <button type="button" @click="pickBgFile">上传底图</button>
-            <button type="button" :disabled="!bgImage || !roads.length" @click="downloadBackgroundOverlayImage">下载叠加图</button>
-            <button type="button" @click="pickPointCloudFile">导入点云</button>
-            <button type="button" :disabled="!pointCloud" @click="clearPointCloud">清除点云</button>
-            <button type="button" :disabled="!selectedRoad" @click="roadCodeDialogVisible = true">查看OpenDRIVE代码</button>
-            <button type="button" @click="openRoadColorDialog">显示设置</button>
+            <button type="button" :disabled="!selectedRoad" @click="roadCodeDialogVisible = true">代码</button>
+          </div>
+        </section>
+        <section class="tool-cluster">
+          <span class="cluster-label">底图</span>
+          <div class="toolbar-group">
+            <button type="button" @click="pickBgFile">上传</button>
+            <button type="button" :disabled="!bgImage || !roads.length" @click="downloadBackgroundOverlayImage">叠加</button>
+          </div>
+        </section>
+        <section class="tool-cluster">
+          <span class="cluster-label">点云</span>
+          <div class="toolbar-group">
+            <button type="button" @click="pickPointCloudFile">导入</button>
+            <button type="button" :disabled="!pointCloud" @click="clearPointCloud">清除</button>
+          </div>
+        </section>
+        <section class="tool-cluster">
+          <span class="cluster-label">显示</span>
+          <div class="toolbar-group">
+            <button type="button" @click="openRoadColorDialog">设置</button>
           </div>
         </section>
       </div>
     </header>
 
-    <aside class="sidebar left-rail">
-      <div class="rail-header rail-header-row">
-        <div>
-          <p class="eyebrow">Road Index</p>
-          <h2 class="rail-title">道路列表</h2>
-        </div>
-        <button type="button" class="rail-toggle-btn" @click="toggleLeftPanel">收起</button>
-      </div>
-      <section class="panel road-panel">
-        <div class="panel-heading">
-          <h2>Roads</h2>
+    <div class="rail-dock rail-dock-left overlay-panel">
+      <div class="rail-dock-head">
+        <h2 class="rail-title">道路列表</h2>
+        <div class="panel-heading-actions">
           <span class="panel-badge">{{ roads.length }}</span>
+          <button type="button" class="rail-toggle-btn" :aria-expanded="!leftPanelCollapsed" @click="toggleLeftPanel">
+            {{ leftPanelCollapsed ? '展开' : '收起' }}
+          </button>
         </div>
+      </div>
+    </div>
+
+    <aside class="sidebar left-rail overlay-panel overlay-left" :aria-hidden="leftPanelCollapsed">
+      <section class="panel measure-panel">
+        <div class="panel-heading measure-panel-heading">
+          <h2>测距信息</h2>
+          <button
+            v-if="measureStats.pointCount"
+            type="button"
+            class="measure-clear-btn"
+            @click="clearMeasure"
+          >
+            清除
+          </button>
+        </div>
+        <template v-if="measureStats.pointCount">
+          <div class="measure-summary">
+            <span>点 {{ measureStats.pointCount }}</span>
+            <span>段 {{ measureStats.segmentCount }}</span>
+            <span>总长 {{ formatNum(measureStats.total, 3) }} m</span>
+          </div>
+          <div class="measure-segments">
+            <div
+              v-for="(len, idx) in measureStats.segmentLengths"
+              :key="`seg-${idx}`"
+              class="measure-segment-row"
+            >
+              段 {{ idx + 1 }}：{{ formatNum(len, 3) }} m
+            </div>
+          </div>
+        </template>
+        <p v-else class="measure-empty">测距模式下在画布左键点击添加测量点</p>
+      </section>
+
+      <section class="panel road-panel">
         <div class="road-search-wrap">
           <input v-model="roadSearchQuery" type="search" placeholder="搜索 road id" class="road-search-input" />
         </div>
@@ -71,14 +146,24 @@
             <span>{{ formatPercent(pointCloudStatus.progress) }}%</span>
           </div>
         </div>
-        <div ref="roadListEl" class="road-list road-list-fill" @scroll="handleRoadListScroll">
+        <div
+          ref="roadListEl"
+          class="road-list road-list-fill"
+          @scroll="handleRoadListScroll"
+          @mouseleave="clearHoveredRoadIndex"
+        >
           <template v-if="useVirtualRoadList">
             <div class="road-list-spacer" :style="{ height: `${roadListTopPadding}px` }"></div>
             <div
               v-for="row in filteredVirtualRoadRows"
               :key="`vroad-${row.road?.id}-${row.index}`"
               class="road-item road-item-compact"
-              :class="{ selected: row.index === selectedRoadIndex, muted: !isRoadVisible(row.road) }"
+              :class="{
+                selected: row.index === selectedRoadIndex,
+                hovered: row.index === hoveredRoadIndex && row.index !== selectedRoadIndex,
+                muted: !isRoadVisible(row.road)
+              }"
+              @mouseenter="setHoveredRoadIndex(row.index)"
             >
               <div class="road-item-main">
                 <button type="button" class="road-item-select" @click="selectRoad(row.index, { center: true })">
@@ -93,11 +178,16 @@
             <div class="road-list-spacer" :style="{ height: `${roadListBottomPadding}px` }"></div>
             <div class="meta road-list-hint">大地图模式：已启用虚拟列表，仅渲染可见道路项。</div>
           </template>
-          <template v-else>
+          <template v-else-if="useRoadTreeList">
             <div v-for="row in filteredRoadTreeRows" :key="`${row.road.id}-${row.index}`" class="road-tree-item">
               <div
                 class="road-item"
-                :class="{ selected: row.index === selectedRoadIndex, muted: !isRoadVisible(row.road) }"
+                :class="{
+                  selected: row.index === selectedRoadIndex,
+                  hovered: row.index === hoveredRoadIndex && row.index !== selectedRoadIndex,
+                  muted: !isRoadVisible(row.road)
+                }"
+                @mouseenter="setHoveredRoadIndex(row.index)"
               >
                 <button type="button" class="road-item-select" @click="selectRoad(row.index, { center: true })">
                   <div>Road {{ row.road.id }} | len={{ formatNum(row.road.length, 2) }}</div>
@@ -125,7 +215,12 @@
                   v-for="child in getChildRoadEntries(row.road.id)"
                   :key="`child-${row.road.id}-${child.index}`"
                   class="child-road-item"
-                  :class="{ selected: child.index === selectedRoadIndex, muted: !isRoadVisible(child.road) }"
+                  :class="{
+                    selected: child.index === selectedRoadIndex,
+                    hovered: child.index === hoveredRoadIndex && child.index !== selectedRoadIndex,
+                    muted: !isRoadVisible(child.road)
+                  }"
+                  @mouseenter="setHoveredRoadIndex(child.index)"
                 >
                   <button type="button" class="road-item-select" @click="selectRoad(child.index, { center: true })">
                     <div>Road {{ child.road.id }} | len={{ formatNum(child.road.length, 2) }}</div>
@@ -146,48 +241,16 @@
       <input ref="pointCloudFileInput" type="file" accept=".pcd,.xyz,.txt,.csv,text/plain,text/csv" class="hidden-file" @change="importPointCloud" />
     </aside>
 
-    <section class="viewer center-stage">
-      <div class="stage-shell">
-        <div class="stage-head">
-          <div>
-            <p class="eyebrow">Workspace</p>
-            <h2>道路画布</h2>
-          </div>
-          <div class="stage-metrics">
-            <span>坐标 x={{ formatNum(mouseWorld.x, 2) }}</span>
-            <span>坐标 y={{ formatYUp(mouseWorld.y) }}</span>
-            <span>yaw={{ formatNum(bgGeo.yaw, 3) }}</span>
-            <span v-if="measureStats.pointCount">测距 点={{ measureStats.pointCount }} | 段={{ measureStats.segmentCount }} | 总长={{ formatNum(measureStats.total, 3) }}m</span>
-            <span v-if="viewerMode === '2d' && hoverRoadCoord.roadId">Road {{ hoverRoadCoord.roadId }} | Lane {{ hoverRoadCoord.laneId || '-' }} | s={{ formatNum(hoverRoadCoord.s, 2) }} | t={{ formatNum(hoverRoadCoord.t, 2) }}</span>
-          </div>
-        </div>
-        <div ref="canvasWrap" class="canvas-wrap" :class="{ 'is-hidden-viewer': viewerMode !== '2d' }">
-          <canvas ref="canvasEl" class="canvas-el" width="1280" height="720" />
-        </div>
-        <ThreeRoadViewer
-          v-if="viewerMode === '3d'"
-          class="viewer-3d"
-          :roads="roads"
-          :point-cloud="pointCloud"
-          :point-cloud-size="pointCloudForm.pointSize"
-          :selected-road-id="selectedRoad ? String(selectedRoad.id) : ''"
-          @select-road="selectRoadById"
-        />
+    <div class="rail-dock rail-dock-right overlay-panel">
+      <div class="rail-dock-head">
+        <h2 class="rail-title">属性面板</h2>
+        <button type="button" class="rail-toggle-btn" :aria-expanded="!rightPanelCollapsed" @click="toggleRightPanel">
+          {{ rightPanelCollapsed ? '展开' : '收起' }}
+        </button>
       </div>
-      <div class="stage-tip">
-        左键交互，滚轮缩放，空格+拖动平移，选择模式可拖当前道路控制点，测距模式可多点测量(米)
-        | 原点: x={{ formatNum(bgGeo.originX, 2) }}, y={{ formatYUp(bgGeo.originY) }}, yaw={{ formatNum(bgGeo.yaw, 3) }}
-      </div>
-    </section>
+    </div>
 
-    <aside class="sidebar right-rail">
-      <div class="rail-header rail-header-row">
-        <div>
-          <p class="eyebrow">Inspector</p>
-          <h2 class="rail-title">属性面板</h2>
-        </div>
-        <button type="button" class="rail-toggle-btn" @click="toggleRightPanel">收起</button>
-      </div>
+    <aside class="sidebar right-rail overlay-panel overlay-right" :aria-hidden="rightPanelCollapsed">
       <section v-if="mode === 'draw'" class="panel">
         <h2>Header</h2>
         <div class="grid2">
@@ -241,12 +304,25 @@
           <div class="row" style="grid-column: 1 / -1; margin-top: 8px;">
             <button type="button" @click="applySelectedRoad">应用道路属性</button>
           </div>
+          <div style="grid-column: 1 / -1; margin-top: 8px;" class="meta lane-section-label">车道列表</div>
+          <div style="grid-column: 1 / -1;" class="lane-list">
+            <template v-if="selectedRoadLaneIds.length">
+              <div v-for="lid in selectedRoadLaneIds" :key="lid" class="lane-row">
+                <span class="lane-id-badge" :class="Number(lid) > 0 ? 'left-lane' : 'right-lane'">
+                  {{ Number(lid) > 0 ? '左' : '右' }} {{ lid }}
+                </span>
+                <span class="lane-side-hint">{{ Number(lid) > 0 ? '左侧' : '右侧' }}第 {{ Math.abs(Number(lid)) }} 条</span>
+                <button type="button" class="lane-del-btn" title="删除此车道" @click="deleteLaneFromRoad(lid)">×</button>
+              </div>
+            </template>
+            <div v-else class="empty" style="padding: 4px 0;">暂无车道数据</div>
+          </div>
         </div>
         <div v-else class="empty">请先在列表或画布中选择道路</div>
       </section>
 
-      <section class="panel">
-        <h2>绘制优化</h2>
+      <section v-if="mode === 'draw'" class="panel">
+        <h2>绘制设置</h2>
         <div class="grid2">
           <label style="grid-column: 1 / -1;">道路平滑度
             <input v-model.number="drawForm.smoothing" type="range" min="0.1" max="0.95" step="0.01" />
@@ -257,6 +333,18 @@
             相交自动生成路口
           </label>
           <div style="grid-column: 1 / -1;" class="meta">默认关闭。勾选后：完成道路时会先做平滑，再尝试在简单十字相交场景自动拆分并生成路口；未勾选时只完成道路，不触发自动路口。</div>
+        </div>
+      </section>
+
+      <section v-if="selectedRoad?.connectorMeta" class="panel">
+        <h2>弯道弧度</h2>
+        <div class="grid2">
+          <label style="grid-column: 1 / -1;">弧度（越大弯道越"鼓"）
+            <input v-model.number="connectForm.smoothness" type="range" min="0.1" max="0.8" step="0.01" />
+          </label>
+          <label>数值<input v-model.number="connectForm.smoothness" type="number" min="0.1" max="0.8" step="0.01" /></label>
+          <label>端点重叠(m)<input v-model.number="connectForm.overlap" type="number" min="0" max="6" step="0.1" /></label>
+          <div v-if="connectorRebuildPending" class="meta" style="grid-column: 1 / -1; color: #f0c060;">正在应用…</div>
         </div>
       </section>
 
@@ -292,17 +380,16 @@
       <section v-if="mode === 'connect'" class="panel">
         <h2>弯道连接</h2>
         <div class="grid2">
-          <label style="grid-column: 1 / -1;">贴合强度(越大弯道越“鼓”)
+          <label style="grid-column: 1 / -1;">弧度（越大越"鼓"）
             <input v-model.number="connectForm.smoothness" type="range" min="0.1" max="0.8" step="0.01" />
           </label>
           <label>数值<input v-model.number="connectForm.smoothness" type="number" min="0.1" max="0.8" step="0.01" /></label>
           <label>端点重叠(m)<input v-model.number="connectForm.overlap" type="number" min="0" max="6" step="0.1" /></label>
-          <div class="meta">连接模式下点击两个端点小球自动生成弯道</div>
+          <div class="meta">点击两个端点小球自动生成弯道</div>
           <div style="grid-column: 1 / -1;" class="meta">第一点: {{ getConnectHandleText(connectDraft.first) }}</div>
           <div style="grid-column: 1 / -1;" class="meta">第二点: {{ getConnectHandleText(connectDraft.second) }}</div>
           <div class="row" style="grid-column: 1 / -1; margin-top: 4px;">
             <button type="button" @click="clearConnectDraft">清空端点选择</button>
-            <button v-if="selectedRoad?.connectorMeta" type="button" @click="rebuildSelectedConnector">重建选中弯道</button>
           </div>
         </div>
       </section>
@@ -435,22 +522,6 @@
         </div>
       </div>
     </div>
-    <button
-      v-if="leftPanelCollapsed"
-      type="button"
-      class="rail-reopen rail-reopen-left"
-      @click="toggleLeftPanel"
-    >
-      道路列表
-    </button>
-    <button
-      v-if="rightPanelCollapsed"
-      type="button"
-      class="rail-reopen rail-reopen-right"
-      @click="toggleRightPanel"
-    >
-      属性面板
-    </button>
   </main>
 </template>
 
@@ -463,6 +534,7 @@ const {
   setMode,
   finishRoad,
   undoPoint,
+  clearMeasure,
   deleteRoad,
   fitView,
   runValidate,
@@ -480,6 +552,9 @@ const {
   openRoadColorDialog,
   roads,
   selectedRoadIndex,
+  hoveredRoadIndex,
+  setHoveredRoadIndex,
+  clearHoveredRoadIndex,
   formatNum,
   formatPercent,
   getChildRoadEntries,
@@ -496,6 +571,7 @@ const {
   roadListEl,
   handleRoadListScroll,
   useVirtualRoadList,
+  useRoadTreeList,
   virtualRoadRows,
   roadListTopPadding,
   roadListBottomPadding,
@@ -537,6 +613,7 @@ const {
   clearJunctionDraft,
   roadForm,
   applySelectedRoad,
+  deleteLaneFromRoad,
   validateDialog
 } = useAppLogic();
 
@@ -546,6 +623,21 @@ const roadCodeEditorText = ref('');
 const leftPanelCollapsed = ref(false);
 const rightPanelCollapsed = ref(false);
 const viewerMode = ref('2d');
+const connectorRebuildPending = ref(false);
+
+let connectorRebuildTimer = null;
+watch(
+  () => [connectForm.smoothness, connectForm.overlap],
+  () => {
+    if (!selectedRoad.value?.connectorMeta) return;
+    connectorRebuildPending.value = true;
+    clearTimeout(connectorRebuildTimer);
+    connectorRebuildTimer = setTimeout(() => {
+      rebuildSelectedConnector();
+      connectorRebuildPending.value = false;
+    }, 1000);
+  }
+);
 
 watch(selectedRoadCode, (value) => {
   roadCodeEditorText.value = value || '';
