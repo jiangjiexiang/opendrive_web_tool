@@ -1,4 +1,17 @@
-import { clamp, polylineLength } from './editorUtils.js';
+'use strict';
+
+function clamp(v, min, max) {
+  return Math.max(min, Math.min(max, v));
+}
+
+function polylineLength(points) {
+  if (!Array.isArray(points) || points.length < 2) return 0;
+  let total = 0;
+  for (let i = 1; i < points.length; i += 1) {
+    total += Math.hypot(points[i].x - points[i - 1].x, points[i].y - points[i - 1].y);
+  }
+  return total;
+}
 
 function sanitizePoints(points, minStep = 0.2) {
   const out = [];
@@ -156,7 +169,7 @@ function buildArcMiddleGeometryFromPoints(points, sStart) {
   return geometry;
 }
 
-export function buildLineArcGeometryFromPoints(points) {
+function buildLineArcGeometryFromPoints(points) {
   const pts = sanitizePoints(points, 0.2);
   if (pts.length < 2) return null;
 
@@ -230,3 +243,7 @@ export function buildLineArcGeometryFromPoints(points) {
     length: Number(s.toFixed(6))
   };
 }
+
+module.exports = {
+  buildLineArcGeometryFromPoints
+};

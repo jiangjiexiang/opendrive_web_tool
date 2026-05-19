@@ -107,13 +107,15 @@ export function getRoadPaletteForRoad(road, selected, hovered, roadColorConfig, 
   };
 }
 
-export function getJunctionGuideStyle(roadColorConfig) {
+export function getJunctionGuideStyle(roadColorConfig, selected = false) {
   const base = String(roadColorConfig?.junctionGuideColor || '#ffdd9b');
+  const fillAlpha = selected ? 0.38 : 0.22;
+  const strokeAlpha = selected ? 0.98 : 0.78;
   return {
-    polygonFill: hexToRgba(base, 0.22) || 'rgba(238, 181, 98, 0.22)',
-    polygonStroke: hexToRgba(base, 0.78) || 'rgba(255, 221, 155, 0.78)',
-    approachLine: hexToRgba(base, 0.7) || 'rgba(118, 251, 209, 0.7)',
-    innerLane: hexToRgba(base, 0.65) || 'rgba(255, 246, 166, 0.65)',
+    polygonFill: hexToRgba(base, fillAlpha) || `rgba(238, 181, 98, ${fillAlpha})`,
+    polygonStroke: hexToRgba(base, strokeAlpha) || `rgba(255, 221, 155, ${strokeAlpha})`,
+    approachLine: hexToRgba(base, selected ? 0.92 : 0.7) || 'rgba(118, 251, 209, 0.7)',
+    innerLane: hexToRgba(base, selected ? 0.88 : 0.65) || 'rgba(255, 246, 166, 0.65)',
     centerDot: hexToRgba(base, 1) || '#fff4be'
   };
 }

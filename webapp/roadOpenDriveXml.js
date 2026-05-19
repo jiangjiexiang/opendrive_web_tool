@@ -1,3 +1,6 @@
+import { isConnectorRoad } from './laneLinkRules.js';
+import { sanitizeGeometryTypes } from './geometrySanitize.js';
+
 function esc(value) {
   return String(value ?? '')
     .replace(/&/g, '&amp;')
@@ -47,9 +50,11 @@ function buildGeometryFromPoints(points) {
 }
 
 function normalizeGeometry(road) {
-  const source = Array.isArray(road?.geometry) && road.geometry.length
-    ? road.geometry
-    : buildGeometryFromPoints(road?.points || []);
+  const source = sanitizeGeometryTypes(
+    Array.isArray(road?.geometry) && road.geometry.length
+      ? road.geometry
+      : buildGeometryFromPoints(road?.points || [])
+  );
   const geometry = [];
   let s = 0;
   (Array.isArray(source) ? source : []).forEach((raw) => {
@@ -88,8 +93,6 @@ function geometryXml(road) {
       tag = `        <arc curvature="${num(g.curvature, 0).toFixed(12)}"/>`;
     } else if (type === 'spiral') {
       tag = `        <spiral curvStart="${num(g.curvStart, 0).toFixed(12)}" curvEnd="${num(g.curvEnd, 0).toFixed(12)}"/>`;
-    } else if (type === 'parampoly3') {
-      tag = `        <paramPoly3 aU="${num(g.aU, 0).toFixed(12)}" bU="${num(g.bU, 0).toFixed(12)}" cU="${num(g.cU, 0).toFixed(12)}" dU="${num(g.dU, 0).toFixed(12)}" aV="${num(g.aV, 0).toFixed(12)}" bV="${num(g.bV, 0).toFixed(12)}" cV="${num(g.cV, 0).toFixed(12)}" dV="${num(g.dV, 0).toFixed(12)}" pRange="${esc(g.pRange || 'normalized')}"/>`;
     }
     return [
       `      <geometry s="${num(g.s, 0).toFixed(6)}" x="${num(g.x, 0).toFixed(6)}" y="${num(g.y, 0).toFixed(6)}" hdg="${num(g.hdg, 0).toFixed(6)}" length="${num(g.length, 0).toFixed(6)}">`,
@@ -134,7 +137,32 @@ function widthXml(records, fallbackWidth, sectionS = 0) {
   return `            <width sOffset="0.000" a="${num(fallbackWidth, 3.5).toFixed(3)}" b="0.000000" c="0.000000" d="0.000000"/>`;
 }
 
-function laneXml(id, type, widthRecords, fallbackWidth, linkSpec = null, sectionS = 0) {
+function roadMarksXml(lane) {
+  const marks = Array.isArray(lane?.roadMarks) && lane.roadMarks.length
+    ? lane.roadMarks
+    : (lane?.roadMark ? [lane.roadMark] : []);
+  if (!marks.length) {
+    return '            <roadMark sOffset="0" type="solid" weight="standard" color="standard" width="0.15"/>';
+  }
+  return marks.map((mark) => (
+    `            <roadMark sOffset="${num(mark.sOffset, 0).toFixed(6)}" type="${esc(mark.type || 'solid')}" weight="${esc(mark.weight || 'standard')}" color="${esc(mark.color || 'standard')}" width="${num(mark.width, 0.15).toFixed(6)}" material="${esc(mark.material || 'standard')}" laneChange="${esc(mark.laneChange || 'none')}"/>`
+  )).join('\n');
+}
+
+function speedsXml(lane) {
+  const speeds = Array.isArray(lane?.speeds) && lane.speeds.length
+    ? lane.speeds
+    : (lane?.speed ? [lane.speed] : []);
+  if (!speeds.length) return '';
+  return speeds.map((speed) => (
+    `            <speed sOffset="${num(speed.sOffset, 0).toFixed(6)}" max="${esc(speed.max ?? '35')}" unit="${esc(speed.unit || 'mph')}"/>`
+  )).join('\n');
+}
+
+function laneXml(lane, widthRecords, fallbackWidth, linkSpec = null, sectionS = 0) {
+  const id = lane?.id ?? lane;
+  const type = lane?.type || 'driving';
+  const level = String(lane?.level ?? 'false');
   const linkLines = [];
   if (linkSpec && (linkSpec.predecessor !== undefined || linkSpec.successor !== undefined)) {
     linkLines.push('            <link>');
@@ -147,10 +175,11 @@ function laneXml(id, type, widthRecords, fallbackWidth, linkSpec = null, section
     linkLines.push('            </link>');
   }
   return [
-    `          <lane id="${esc(id)}" type="${esc(type || 'driving')}" level="false">`,
+    `          <lane id="${esc(id)}" type="${esc(type || 'driving')}" level="${esc(level)}">`,
     ...linkLines,
-    Number(id) === 0 ? '' : widthXml(widthRecords, fallbackWidth, sectionS),
-    Number(id) === 0 ? '' : '            <roadMark sOffset="0" type="solid" weight="standard" color="standard" width="0.15"/>',
+    Number(id) === 0 ? '' : widthXml(widthRecords || lane?.widthProfile, fallbackWidth, sectionS),
+    Number(id) === 0 ? '' : roadMarksXml(lane),
+    Number(id) === 0 ? '' : speedsXml(lane),
     '          </lane>'
   ].filter(Boolean).join('\n');
 }
@@ -162,21 +191,22 @@ function laneSectionXml(section, road) {
   const rightLanes = Array.isArray(section?.rightLanes) && section.rightLanes.length
     ? section.rightLanes
     : Array.from({ length: Math.max(0, Number(section?.rightLaneCount ?? road?.rightLaneCount ?? 0)) }, (_, i) => ({ id: -(i + 1), type: 'driving' }));
-  const laneLinks = section?.laneLinks || {};
+  const laneLinks = isConnectorRoad(road) ? (section?.laneLinks || {}) : {};
   const sectionS = num(section?.s, 0);
   const leftWidth = num(section?.leftLaneWidth ?? road?.leftLaneWidth ?? road?.laneWidth, 3.5);
   const rightWidth = num(section?.rightLaneWidth ?? road?.rightLaneWidth ?? road?.laneWidth, 3.5);
-  const singleSide = (leftLanes.length === 0) !== (rightLanes.length === 0);
+  const singleSide = String(section?.singleSide || '').toLowerCase() === 'true'
+    || ((leftLanes.length === 0) !== (rightLanes.length === 0));
   return [
     `      <laneSection s="${num(section?.s, 0).toFixed(3)}" singleSide="${singleSide ? 'true' : 'false'}">`,
     '        <left>',
-    leftLanes.map((lane) => laneXml(lane.id, lane.type || 'driving', lane.widthProfile || section?.leftWidthRecords || road?.leftWidthRecords, leftWidth, laneLinks[lane.id], sectionS)).join('\n'),
+    leftLanes.map((lane) => laneXml(lane, lane.widthProfile || section?.leftWidthRecords || road?.leftWidthRecords, leftWidth, laneLinks[lane.id], sectionS)).join('\n'),
     '        </left>',
     '        <center>',
-    laneXml(0, section?.centerType === 'none' ? 'none' : (section?.centerType || road?.centerType || 'none'), null, 0, laneLinks[0], sectionS),
+    laneXml({ id: 0, type: section?.centerType === 'none' ? 'none' : (section?.centerType || road?.centerType || 'none') }, null, 0, laneLinks[0], sectionS),
     '        </center>',
     '        <right>',
-    rightLanes.map((lane) => laneXml(lane.id, lane.type || 'driving', lane.widthProfile || section?.rightWidthRecords || road?.rightWidthRecords, rightWidth, laneLinks[lane.id], sectionS)).join('\n'),
+    rightLanes.map((lane) => laneXml(lane, lane.widthProfile || section?.rightWidthRecords || road?.rightWidthRecords, rightWidth, laneLinks[lane.id], sectionS)).join('\n'),
     '        </right>',
     '      </laneSection>'
   ].join('\n');
@@ -216,6 +246,18 @@ export function selectedRoadToOpenDriveXml(road) {
   const successorId = String(road?.successorId ?? '').trim();
   const predecessorType = String(road?.predecessorType || 'road');
   const successorType = String(road?.successorType || 'road');
+  const typeRecords = Array.isArray(road?.typeRecords) && road.typeRecords.length
+    ? road.typeRecords
+    : [{ s: 0, type: 'town', speedMax: '35', speedUnit: 'mph' }];
+  const elevationRecords = Array.isArray(road?.elevationRecords) && road.elevationRecords.length
+    ? road.elevationRecords
+    : [{ s: 0, a: 0, b: 0, c: 0, d: 0 }];
+  const superelevationRecords = Array.isArray(road?.superelevationRecords) && road.superelevationRecords.length
+    ? road.superelevationRecords
+    : [{ s: 0, a: 0, b: 0, c: 0, d: 0 }];
+  const shapeRecords = Array.isArray(road?.shapeRecords) && road.shapeRecords.length
+    ? road.shapeRecords
+    : [{ s: 0, t: -num(road?.rightLaneWidth ?? road?.laneWidth, 3.5), a: 0, b: 0, c: 0, d: 0 }];
   const linkLines = [];
   if ((predecessorId && predecessorId !== rid) || (successorId && successorId !== rid)) {
     linkLines.push('    <link>');
@@ -228,19 +270,28 @@ export function selectedRoadToOpenDriveXml(road) {
     linkLines.push('    </link>');
   }
   return [
-    `  <road name="road_${esc(rid)}" length="${num(length || road?.length, 1).toFixed(6)}" id="${esc(rid)}" junction="${esc(junction)}">`,
+    `  <road name="road${esc(rid)}" length="${num(length || road?.length, 1).toFixed(6)}" id="${esc(rid)}" junction="${esc(junction)}">`,
     ...linkLines,
-    '    <type s="0.000000" type="town">',
-    '      <speed max="35" unit="mph"/>',
-    '    </type>',
+    typeRecords.map((t) => [
+      `    <type s="${num(t.s, 0).toFixed(6)}" type="${esc(t.type || 'town')}">`,
+      `      <speed max="${esc(t.speedMax ?? '35')}" unit="${esc(t.speedUnit || 'mph')}"/>`,
+      '    </type>'
+    ].join('\n')).join('\n'),
     '    <planView>',
     geometryXml(road),
     '    </planView>',
     '    <elevationProfile>',
-    '      <elevation s="0.000000" a="0.000000" b="0.000000" c="0.000000" d="0.000000"/>',
+    elevationRecords.map((e) => (
+      `      <elevation s="${num(e.s, 0).toFixed(6)}" a="${num(e.a, 0).toFixed(6)}" b="${num(e.b, 0).toFixed(6)}" c="${num(e.c, 0).toFixed(6)}" d="${num(e.d, 0).toFixed(6)}"/>`
+    )).join('\n'),
     '    </elevationProfile>',
     '    <lateralProfile>',
-    '      <superelevation s="0.000000" a="0.000000" b="0.000000" c="0.000000" d="0.000000"/>',
+    superelevationRecords.map((s) => (
+      `      <superelevation s="${num(s.s, 0).toFixed(6)}" a="${num(s.a, 0).toFixed(6)}" b="${num(s.b, 0).toFixed(6)}" c="${num(s.c, 0).toFixed(6)}" d="${num(s.d, 0).toFixed(6)}"/>`
+    )).join('\n'),
+    shapeRecords.map((s) => (
+      `      <shape s="${num(s.s, 0).toFixed(6)}" t="${num(s.t, 0).toFixed(6)}" a="${num(s.a, 0).toFixed(6)}" b="${num(s.b, 0).toFixed(6)}" c="${num(s.c, 0).toFixed(6)}" d="${num(s.d, 0).toFixed(6)}"/>`
+    )).join('\n'),
     '    </lateralProfile>',
     lanesXml(road),
     '  </road>'

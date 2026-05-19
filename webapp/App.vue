@@ -35,7 +35,7 @@
           <div class="toolbar-group">
             <button type="button" class="mode-btn" :class="{ active: viewerMode === '2d' }" @click="setViewerMode('2d')">2D</button>
             <button type="button" class="mode-btn" :class="{ active: viewerMode === '3d' }" @click="setViewerMode('3d')">3D</button>
-            <button type="button" class="mode-btn" :class="{ active: mode === 'draw' }" @click="setMode('draw')">绘制</button>
+            <button type="button" class="mode-btn" :class="{ active: mode === 'draw' }" @click="requestDrawMode">绘制</button>
             <button type="button" class="mode-btn" :class="{ active: mode === 'select' }" @click="setMode('select')">选择</button>
             <button type="button" class="mode-btn" :class="{ active: mode === 'measure' }" @click="setMode('measure')">测距</button>
             <button type="button" class="mode-btn" :class="{ active: mode === 'connect' }" @click="setMode('connect')">弯道</button>
@@ -264,14 +264,61 @@
             v-for="mesh in junctionMeshes"
             :key="`junction-${mesh.id}`"
             class="road-item junction-item"
+            :class="{
+              selected: String(mesh.id) === String(selectedJunctionId),
+              expanded: isJunctionListExpanded(mesh.id)
+            }"
           >
-            <button type="button" class="road-item-select" @click="centerViewOnJunction(mesh.id)">
-              <div>Junction {{ mesh.id }}</div>
-              <div class="meta">
-                {{ (mesh.approaches || []).length }} 条接入
-                | {{ (mesh.connectorMeta || []).length }} 条连接
-              </div>
-            </button>
+            <div class="junction-item-header">
+              <button
+                type="button"
+                class="junction-fold-btn"
+                :aria-expanded="isJunctionListExpanded(mesh.id)"
+                :title="isJunctionListExpanded(mesh.id) ? '收起' : '展开'"
+                @click.stop="toggleJunctionListExpanded(mesh.id)"
+              >
+                {{ isJunctionListExpanded(mesh.id) ? '▾' : '▸' }}
+              </button>
+              <button type="button" class="road-item-select junction-item-select" @click="selectJunction(mesh.id)">
+                <div class="junction-item-title">{{ mesh.name || `Junction ${mesh.id}` }}</div>
+                <div class="meta junction-item-summary">
+                  {{ getJunctionLinkRows(mesh).length }} 条
+                  <template v-if="!isJunctionListExpanded(mesh.id) && getJunctionLinkRows(mesh).length">
+                    · 点 ▸ 展开
+                  </template>
+                </div>
+              </button>
+            </div>
+            <ul
+              v-if="isJunctionListExpanded(mesh.id) && getJunctionLinkRows(mesh).length"
+              class="junction-links junction-links-scroll"
+            >
+              <li
+                v-for="row in getJunctionLinkRows(mesh)"
+                :key="row.key"
+                class="junction-link-row junction-link-row-compact"
+              >
+                <span class="junction-link-compact-main">
+                  <span class="junction-link-label">入</span>
+                  <button type="button" class="junction-link-btn" @click.stop="selectRoadById(row.incomingRoad)">
+                    R{{ row.incomingRoad }}
+                  </button>
+                  <span class="junction-link-at">@{{ row.contactPoint }}</span>
+                  <span class="junction-link-arrow">→</span>
+                  <span class="junction-link-label">连</span>
+                  <button type="button" class="junction-link-btn" @click.stop="selectRoadById(row.connectingRoad)">
+                    R{{ row.connectingRoad }}
+                  </button>
+                </span>
+                <span v-if="row.laneText" class="junction-link-lanes-inline">{{ row.laneText }}</span>
+              </li>
+            </ul>
+            <div
+              v-else-if="isJunctionListExpanded(mesh.id)"
+              class="junction-link-empty meta"
+            >
+              无 connection
+            </div>
           </div>
           <div v-if="!junctionMeshes.length" class="empty">暂无路口</div>
         </div>
@@ -359,10 +406,12 @@
             </select>
           </label>
           <label>succ id<input v-model="roadForm.successorId" /></label>
-          <div style="grid-column: 1 / -1;" class="meta">lane links</div>
-          <template v-for="laneLink in roadForm.laneLinks" :key="laneLink.laneId">
-            <label>lane {{ laneLink.laneId }} pred<input v-model="laneLink.predecessor" /></label>
-            <label>lane {{ laneLink.laneId }} succ<input v-model="laneLink.successor" /></label>
+          <template v-if="selectedRoad && String(selectedRoad.junction || '-1') !== '-1'">
+            <div style="grid-column: 1 / -1;" class="meta">车道连接（行驶方向：来向 pred → 去向 succ）</div>
+            <template v-for="laneLink in roadForm.laneLinks" :key="laneLink.laneId">
+              <label>lane {{ laneLink.laneId }} pred<input v-model="laneLink.predecessor" /></label>
+              <label>lane {{ laneLink.laneId }} succ<input v-model="laneLink.successor" /></label>
+            </template>
           </template>
           <div class="row" style="grid-column: 1 / -1; margin-top: 8px;">
             <button type="button" @click="applySelectedRoad">应用道路属性</button>
@@ -387,7 +436,7 @@
       <section v-if="mode === 'draw'" class="panel">
         <h2>绘制设置</h2>
         <div class="grid2">
-          <label style="grid-column: 1 / -1;">道路平滑度
+          <label style="grid-column: 1 / -1;">弯道弧度（平滑度越高弧度越大）
             <input v-model.number="drawForm.smoothing" type="range" min="0.1" max="0.95" step="0.01" />
           </label>
           <label>数值<input v-model.number="drawForm.smoothing" type="number" min="0.1" max="0.95" step="0.01" /></label>
@@ -395,7 +444,7 @@
             <input v-model="drawForm.autoJunction" type="checkbox" />
             相交自动生成路口
           </label>
-          <div style="grid-column: 1 / -1;" class="meta">默认关闭。勾选后：完成道路时会先做平滑，再尝试在简单十字相交场景自动拆分并生成路口；未勾选时只完成道路，不触发自动路口。</div>
+          <div style="grid-column: 1 / -1;" class="meta">钢笔式绘制：点击蓝色锚点定端点与起/止方向；拖橙色菱形只改中间弧度（line+arc+line，起止方向不变）。拖回弦中点附近为直线。移动端点请拖蓝色锚点。Enter 或「完成」结束。</div>
         </div>
       </section>
 
@@ -546,6 +595,21 @@
       </div>
     </div>
 
+    <div v-if="drawKindDialog.visible" class="dialog-mask" @click.self="cancelDrawKindDialog">
+      <div class="dialog" style="max-width: 400px;">
+        <div class="dialog-head">
+          <h3>选择绘制类型</h3>
+          <button type="button" class="dialog-close" @click="cancelDrawKindDialog">关闭</button>
+        </div>
+        <p class="meta" style="margin: 12px 0 16px;">请选择本次绘制方式，之后可在侧栏「重新选择」中切换。</p>
+        <div class="row" style="gap: 10px; flex-wrap: wrap;">
+          <button type="button" class="mode-btn" style="flex: 1; min-width: 120px;" @click="confirmDrawKind('line')">直线</button>
+          <button type="button" class="mode-btn" style="flex: 1; min-width: 120px;" @click="confirmDrawKind('curve')">曲线</button>
+        </div>
+        <p class="meta" style="margin-top: 14px;">直线：相邻锚点连线。曲线：可拖橙色菱形调节弧度。</p>
+      </div>
+    </div>
+
     <div v-if="validateDialog.visible" class="dialog-mask" @click.self="validateDialog.visible = false">
       <div class="dialog">
         <div class="dialog-head">
@@ -599,11 +663,17 @@
 
 <script setup>
 import { useAppLogic } from './appLogic.js';
+import { useAppShell } from './useAppShell.js';
 import ThreeRoadViewer from './ThreeRoadViewer.vue';
 
+const app = useAppLogic();
 const {
   mode,
   setMode,
+  requestDrawMode,
+  confirmDrawKind,
+  cancelDrawKindDialog,
+  drawKindDialog,
   finishRoad,
   undoPoint,
   clearMeasure,
@@ -682,6 +752,11 @@ const {
   junctionDraft,
   junctionMeshes,
   junctionSpecs,
+  selectedJunctionId,
+  selectJunction,
+  getJunctionLinkRows,
+  isJunctionListExpanded,
+  toggleJunctionListExpanded,
   centerViewOnJunction,
   generateJunctionFromDraft,
   clearJunctionDraft,
@@ -689,112 +764,23 @@ const {
   applySelectedRoad,
   deleteLaneFromRoad,
   validateDialog
-} = useAppLogic();
+} = app;
 
-import { computed, nextTick, ref, watch } from 'vue';
-const roadCodeDialogVisible = ref(false);
-const roadCodeEditorText = ref('');
-const leftPanelCollapsed = ref(false);
-const rightPanelCollapsed = ref(false);
-const viewerMode = ref('2d');
-const connectorRebuildPending = ref(false);
-const leftPanelTab = ref('roads');
-const leftPanelTabs = [
-  { id: 'roads', label: '道路' },
-  { id: 'measure', label: '测距' },
-  { id: 'junction', label: '路口' }
-];
-
-const junctionListRows = computed(() => (junctionMeshes.value || []).map((mesh) => {
-  const id = String(mesh?.id ?? '');
-  const spec = (junctionSpecs.value || []).find((item) => String(item?.id ?? '') === id);
-  return {
-    mesh,
-    id,
-    name: String(spec?.name || `junction_${id}`)
-  };
-}));
-
-const rightPanelTab = ref('road');
-
-const rightPanelTabs = computed(() => {
-  const tabs = [
-    { id: 'road', label: '道路' },
-    { id: 'pointcloud', label: '点云' }
-  ];
-  if (mode.value === 'connect') tabs.push({ id: 'connect', label: '连接' });
-  if (mode.value === 'junction') tabs.push({ id: 'junction', label: '路口' });
-  return tabs;
-});
-
-watch(mode, (next) => {
-  if (next === 'measure') leftPanelTab.value = 'measure';
-  if (next === 'connect') rightPanelTab.value = 'connect';
-  else if (next === 'junction') rightPanelTab.value = 'junction';
-  else if (!rightPanelTabs.value.some((tab) => tab.id === rightPanelTab.value)) {
-    rightPanelTab.value = 'road';
-  }
-});
-
-watch(rightPanelTabs, (tabs) => {
-  if (!tabs.some((tab) => tab.id === rightPanelTab.value)) {
-    rightPanelTab.value = tabs[0]?.id || 'road';
-  }
-});
-
-let connectorRebuildTimer = null;
-watch(
-  () => [connectForm.smoothness, connectForm.overlap],
-  () => {
-    if (!selectedRoad.value?.connectorMeta) return;
-    connectorRebuildPending.value = true;
-    clearTimeout(connectorRebuildTimer);
-    connectorRebuildTimer = setTimeout(() => {
-      rebuildSelectedConnector();
-      connectorRebuildPending.value = false;
-    }, 1000);
-  }
-);
-
-watch(selectedRoadCode, (value) => {
-  roadCodeEditorText.value = value || '';
-}, { immediate: true });
-
-function applyRoadCode() {
-  try {
-    applySelectedRoadCode(roadCodeEditorText.value);
-    roadCodeDialogVisible.value = false;
-  } catch (error) {
-    window.alert(String(error?.message || error));
-  }
-}
-
-async function refreshCanvasAfterLayoutChange() {
-  await nextTick();
-  window.setTimeout(() => {
-    fitView();
-  }, 280);
-}
-
-async function toggleLeftPanel() {
-  leftPanelCollapsed.value = !leftPanelCollapsed.value;
-  await refreshCanvasAfterLayoutChange();
-}
-
-async function toggleRightPanel() {
-  rightPanelCollapsed.value = !rightPanelCollapsed.value;
-  await refreshCanvasAfterLayoutChange();
-}
-
-async function setViewerMode(nextMode) {
-  viewerMode.value = nextMode === '3d' ? '3d' : '2d';
-  if (viewerMode.value === '2d') {
-    await refreshCanvasAfterLayoutChange();
-  }
-}
-
-function selectRoadById(roadId) {
-  const index = roads.value.findIndex((road) => String(road?.id ?? '') === String(roadId));
-  if (index >= 0) selectRoad(index);
-}
+const {
+  roadCodeDialogVisible,
+  roadCodeEditorText,
+  leftPanelCollapsed,
+  rightPanelCollapsed,
+  viewerMode,
+  connectorRebuildPending,
+  leftPanelTab,
+  leftPanelTabs,
+  rightPanelTab,
+  rightPanelTabs,
+  applyRoadCode,
+  toggleLeftPanel,
+  toggleRightPanel,
+  setViewerMode,
+  selectRoadById
+} = useAppShell(app);
 </script>

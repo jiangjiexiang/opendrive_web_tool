@@ -1,3 +1,4 @@
+
 export function parseXodrDoc(xmlText) {
   const parser = new DOMParser();
   const doc = parser.parseFromString(String(xmlText || ''), 'application/xml');
@@ -61,17 +62,126 @@ function parseLaneWidthRecords(laneEl, sectionS) {
   return records.length ? records : [{ sOffset: sectionS, a: 0, b: 0, c: 0, d: 0 }];
 }
 
+function parseRoadMarkRecords(laneEl) {
+  return Array.from(laneEl?.querySelectorAll(':scope > roadMark') || []).map((node) => ({
+    sOffset: parseAttrNum(node, 'sOffset', 0),
+    type: node.getAttribute('type') || 'solid',
+    weight: node.getAttribute('weight') || 'standard',
+    color: node.getAttribute('color') || 'standard',
+    width: parseAttrNum(node, 'width', 0.15),
+    material: node.getAttribute('material') || 'standard',
+    laneChange: node.getAttribute('laneChange') || 'none'
+  }));
+}
+
+function parseSpeedRecords(laneEl) {
+  return Array.from(laneEl?.querySelectorAll(':scope > speed') || []).map((node) => ({
+    sOffset: parseAttrNum(node, 'sOffset', 0),
+    max: node.getAttribute('max') || '35',
+    unit: node.getAttribute('unit') || 'mph'
+  }));
+}
+
+function parsePlanViewGeometry(roadEl) {
+  const segments = [];
+  Array.from(roadEl?.querySelectorAll(':scope > planView > geometry') || []).forEach((geomEl) => {
+    const segment = {
+      s: parseAttrNum(geomEl, 's', 0),
+      x: parseAttrNum(geomEl, 'x', 0),
+      y: parseAttrNum(geomEl, 'y', 0),
+      hdg: parseAttrNum(geomEl, 'hdg', 0),
+      length: parseAttrNum(geomEl, 'length', 0),
+      type: 'line',
+      curvature: 0,
+      curvStart: 0,
+      curvEnd: 0,
+      pRange: 'normalized',
+      aU: 0, bU: 0, cU: 0, dU: 0,
+      aV: 0, bV: 0, cV: 0, dV: 0
+    };
+    const arc = geomEl.querySelector(':scope > arc');
+    const spiral = geomEl.querySelector(':scope > spiral');
+    const param = geomEl.querySelector(':scope > paramPoly3');
+    if (arc) {
+      segment.type = 'arc';
+      segment.curvature = parseAttrNum(arc, 'curvature', 0);
+    } else if (spiral) {
+      segment.type = 'spiral';
+      segment.curvStart = parseAttrNum(spiral, 'curvStart', 0);
+      segment.curvEnd = parseAttrNum(spiral, 'curvEnd', 0);
+    } else if (param) {
+      segment.type = 'parampoly3';
+      segment.pRange = param.getAttribute('pRange') || 'normalized';
+      segment.aU = parseAttrNum(param, 'aU', 0);
+      segment.bU = parseAttrNum(param, 'bU', 0);
+      segment.cU = parseAttrNum(param, 'cU', 0);
+      segment.dU = parseAttrNum(param, 'dU', 0);
+      segment.aV = parseAttrNum(param, 'aV', 0);
+      segment.bV = parseAttrNum(param, 'bV', 0);
+      segment.cV = parseAttrNum(param, 'cV', 0);
+      segment.dV = parseAttrNum(param, 'dV', 0);
+    }
+    if (segment.length > 1e-8) segments.push(segment);
+  });
+  return segments;
+}
+
+function parseTypeRecords(roadEl) {
+  return Array.from(roadEl?.querySelectorAll(':scope > type') || []).map((typeEl) => ({
+    s: parseAttrNum(typeEl, 's', 0),
+    type: typeEl.getAttribute('type') || 'town',
+    speedMax: typeEl.querySelector(':scope > speed')?.getAttribute('max') || '35',
+    speedUnit: typeEl.querySelector(':scope > speed')?.getAttribute('unit') || 'mph'
+  }));
+}
+
+function parseElevationRecords(roadEl) {
+  const records = parseCubicRecords(roadEl?.querySelectorAll(':scope > elevationProfile > elevation') || [], 's', 0);
+  return records.length ? records.map((r) => ({
+    s: r.sOffset,
+    a: r.a,
+    b: r.b,
+    c: r.c,
+    d: r.d
+  })) : [{ s: 0, a: 0, b: 0, c: 0, d: 0 }];
+}
+
+function parseLateralProfileRecords(roadEl) {
+  const superelevation = parseCubicRecords(
+    roadEl?.querySelectorAll(':scope > lateralProfile > superelevation') || [],
+    's',
+    0
+  ).map((r) => ({ s: r.sOffset, a: r.a, b: r.b, c: r.c, d: r.d }));
+  const shapes = Array.from(roadEl?.querySelectorAll(':scope > lateralProfile > shape') || []).map((node) => ({
+    s: parseAttrNum(node, 's', 0),
+    t: parseAttrNum(node, 't', 0),
+    a: parseAttrNum(node, 'a', 0),
+    b: parseAttrNum(node, 'b', 0),
+    c: parseAttrNum(node, 'c', 0),
+    d: parseAttrNum(node, 'd', 0)
+  }));
+  return {
+    superelevationRecords: superelevation.length ? superelevation : [{ s: 0, a: 0, b: 0, c: 0, d: 0 }],
+    shapeRecords: shapes.length ? shapes : [{ s: 0, t: 0, a: 0, b: 0, c: 0, d: 0 }]
+  };
+}
+
 function parseLane(laneEl, sectionS) {
   const laneId = String(laneEl.getAttribute('id') || '').trim();
   const linkEl = laneEl.querySelector(':scope > link');
   const predEl = linkEl?.querySelector(':scope > predecessor');
   const succEl = linkEl?.querySelector(':scope > successor');
   const vectorLaneEl = laneEl.querySelector(':scope > userData > vectorLane');
+  const roadMarks = parseRoadMarkRecords(laneEl);
+  const speeds = parseSpeedRecords(laneEl);
   return {
     id: laneId,
     type: laneEl.getAttribute('type') || 'none',
+    level: laneEl.getAttribute('level') || 'false',
     travelDir: vectorLaneEl?.getAttribute('travelDir') || '',
     widthProfile: parseLaneWidthRecords(laneEl, sectionS),
+    roadMarks,
+    speeds,
     predecessor: predEl?.getAttribute('id') ?? '',
     successor: succEl?.getAttribute('id') ?? ''
   };
@@ -129,6 +239,8 @@ export function parseRoadDetailsFromXodr(source) {
   doc.querySelectorAll('OpenDRIVE > road').forEach((roadEl) => {
     const rid = String(roadEl.getAttribute('id') || '').trim();
     if (!rid) return;
+    const junctionAttr = String(roadEl.getAttribute('junction') ?? '-1').trim();
+    const isConnector = junctionAttr !== '' && junctionAttr !== '-1';
     rawRoads[rid] = new XMLSerializer().serializeToString(roadEl);
     const detail = {
       predecessorType: 'road',
@@ -158,20 +270,22 @@ export function parseRoadDetailsFromXodr(source) {
         .map((laneEl) => parseLane(laneEl, sectionS));
       const rightLanes = sortLaneNodes(sectionEl.querySelectorAll(':scope > right > lane'), 'right')
         .map((laneEl) => parseLane(laneEl, sectionS));
-      const laneEls = Array.from(sectionEl.querySelectorAll(':scope > left > lane, :scope > center > lane, :scope > right > lane'));
-      laneEls.forEach((laneEl) => {
-        const laneId = String(laneEl.getAttribute('id') || '').trim();
-        if (!laneId || laneId === '0') return;
-        const laneLinkEl = laneEl.querySelector(':scope > link');
-        if (!laneLinkEl) return;
-        const predEl = laneLinkEl.querySelector(':scope > predecessor');
-        const succEl = laneLinkEl.querySelector(':scope > successor');
-        if (!predEl && !succEl) return;
-        laneLinks[laneId] = {
-          predecessor: predEl?.getAttribute('id') ?? '',
-          successor: succEl?.getAttribute('id') ?? ''
-        };
-      });
+      if (isConnector) {
+        const laneEls = Array.from(sectionEl.querySelectorAll(':scope > left > lane, :scope > center > lane, :scope > right > lane'));
+        laneEls.forEach((laneEl) => {
+          const laneId = String(laneEl.getAttribute('id') || '').trim();
+          if (!laneId || laneId === '0') return;
+          const laneLinkEl = laneEl.querySelector(':scope > link');
+          if (!laneLinkEl) return;
+          const predEl = laneLinkEl.querySelector(':scope > predecessor');
+          const succEl = laneLinkEl.querySelector(':scope > successor');
+          if (!predEl && !succEl) return;
+          laneLinks[laneId] = {
+            predecessor: predEl?.getAttribute('id') ?? '',
+            successor: succEl?.getAttribute('id') ?? ''
+          };
+        });
+      }
       return {
         s: sectionS,
         singleSide: String(sectionEl.getAttribute('singleSide') || ''),
@@ -182,20 +296,33 @@ export function parseRoadDetailsFromXodr(source) {
       };
     });
     detail.laneOffsetRecords = parseLaneOffsetRecords(roadEl);
-    if (pred != null || succ != null) {
-      details[rid] = detail;
-    } else if (detail.laneSectionsSpec.length || detail.laneOffsetRecords.length) {
-      details[rid] = detail;
+    detail.geometry = parsePlanViewGeometry(roadEl);
+    detail.typeRecords = parseTypeRecords(roadEl);
+    detail.elevationRecords = parseElevationRecords(roadEl);
+    const lateral = parseLateralProfileRecords(roadEl);
+    detail.superelevationRecords = lateral.superelevationRecords;
+    detail.shapeRecords = lateral.shapeRecords;
+    if (!isConnector) {
+      detail.laneSectionsSpec = detail.laneSectionsSpec.map((section) => ({
+        ...section,
+        laneLinks: {},
+        leftLanes: (section.leftLanes || []).map(({ predecessor, successor, ...lane }) => ({ ...lane })),
+        rightLanes: (section.rightLanes || []).map(({ predecessor, successor, ...lane }) => ({ ...lane }))
+      }));
     }
+    details[rid] = detail;
   });
   return { details, rawRoads };
 }
 
 export function parseJunctionSpecsFromXodr(source) {
-  const { doc } = resolveXodrContext(source);
+  const { root } = resolveXodrContext(source);
   const specs = [];
   const rawById = {};
-  doc.querySelectorAll('OpenDRIVE > junction').forEach((junctionEl) => {
+  const junctionEls = Array.from(root.children).filter(
+    (el) => String(el.localName || el.tagName || '').toLowerCase() === 'junction'
+  );
+  junctionEls.forEach((junctionEl) => {
     const jid = String(junctionEl.getAttribute('id') || '').trim();
     if (!jid) return;
     rawById[jid] = new XMLSerializer().serializeToString(junctionEl);
