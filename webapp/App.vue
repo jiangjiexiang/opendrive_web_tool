@@ -19,6 +19,7 @@
         <span>坐标 x={{ formatNum(mouseWorld.x, 2) }}</span>
         <span>坐标 y={{ formatYUp(mouseWorld.y) }}</span>
         <span>yaw={{ formatNum(bgGeo.yaw, 3) }}</span>
+        <span v-if="backgroundOverlayStatus.message">{{ backgroundOverlayStatus.message }}</span>
         <span v-if="measureStats.pointCount">测距 点={{ measureStats.pointCount }} | 段={{ measureStats.segmentCount }} | 总长={{ formatNum(measureStats.total, 3) }}m</span>
         <span v-if="viewerMode === '2d' && hoverRoadCoord.roadId">Road {{ hoverRoadCoord.roadId }} | Lane {{ hoverRoadCoord.laneId || '-' }} | s={{ formatNum(hoverRoadCoord.s, 2) }} | t={{ formatNum(hoverRoadCoord.t, 2) }}</span>
       </div>
@@ -67,7 +68,13 @@
           <span class="cluster-label">底图</span>
           <div class="toolbar-group">
             <button type="button" @click="pickBgFile">上传</button>
-            <button type="button" :disabled="!bgImage || !roads.length" @click="downloadBackgroundOverlayImage">叠加</button>
+            <button
+              type="button"
+              :disabled="backgroundOverlayStatus.loading"
+              @click="downloadBackgroundOverlayImage"
+            >
+              {{ backgroundOverlayStatus.loading ? '导出中…' : '叠加' }}
+            </button>
           </div>
         </section>
         <section class="tool-cluster">
@@ -687,8 +694,8 @@ const {
   pickPointCloudFile,
   importStatus,
   pointCloud,
-  bgImage,
   pointCloudStatus,
+  backgroundOverlayStatus,
   pointCloudForm,
   clearPointCloud,
   openRoadColorDialog,

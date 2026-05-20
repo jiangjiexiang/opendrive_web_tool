@@ -100,6 +100,7 @@ export function useAppLogic() {
     importStatus: host.importStatus,
     pointCloud: host.pointCloud,
     pointCloudStatus: host.pointCloudStatus,
+    backgroundOverlayStatus: host.backgroundOverlayStatus,
     pointCloudForm: host.pointCloudForm,
     clearPointCloud: host.clearPointCloud,
     bgImage: host.bgImage,

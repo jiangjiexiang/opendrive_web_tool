@@ -42,6 +42,11 @@ export function createEditorState() {
     type: '',
     progress: 0
   });
+  const backgroundOverlayStatus = reactive({
+    loading: false,
+    message: '',
+    type: ''
+  });
   const pointCloudForm = reactive({
     pointSize: 0.18,
     sampleRatio: 30,
@@ -196,6 +201,7 @@ export function createEditorState() {
     rawPointCloud,
     pointCloud,
     pointCloudStatus,
+    backgroundOverlayStatus,
     pointCloudForm,
     mouseWorld,
     hoverRoadCoord,

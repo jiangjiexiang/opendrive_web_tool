@@ -92,8 +92,11 @@ function downloadBlob(blob, filename) {
   const a = document.createElement('a');
   a.href = url;
   a.download = filename;
+  a.style.display = 'none';
+  document.body.appendChild(a);
   a.click();
-  URL.revokeObjectURL(url);
+  a.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
 function getBackgroundWorldBounds() {
@@ -145,58 +148,86 @@ function calculateExportSize(bounds) {
 }
 
 async function downloadBackgroundOverlayImage() {
+  if (host.backgroundOverlayStatus) {
+    host.backgroundOverlayStatus.loading = true;
+    host.backgroundOverlayStatus.message = '';
+    host.backgroundOverlayStatus.type = '';
+  }
+  const fail = (message) => {
+    if (host.backgroundOverlayStatus) {
+      host.backgroundOverlayStatus.message = message;
+      host.backgroundOverlayStatus.type = 'error';
+    }
+    window.alert(message);
+  };
   if (!host.bgImage.value) {
-    window.alert('请先上传底图。');
+    fail('请先上传底图。');
+    if (host.backgroundOverlayStatus) host.backgroundOverlayStatus.loading = false;
     return;
   }
   if (!host.roads.value.length) {
-    window.alert('请先导入或绘制OpenDRIVE道路。');
+    fail('请先导入或绘制 OpenDRIVE 道路。');
+    if (host.backgroundOverlayStatus) host.backgroundOverlayStatus.loading = false;
     return;
   }
   const bounds = getBackgroundWorldBounds();
   if (!bounds) {
-    window.alert('底图范围无效，无法导出图像。');
+    fail('底图范围无效，无法导出图像。');
+    if (host.backgroundOverlayStatus) host.backgroundOverlayStatus.loading = false;
     return;
   }
-  const exportSize = calculateExportSize(bounds);
-  const exportCanvas = document.createElement('canvas');
-  exportCanvas.width = exportSize.width;
-  exportCanvas.height = exportSize.height;
-  const exportCtx = exportCanvas.getContext('2d');
-  if (!exportCtx) {
-    window.alert('当前浏览器无法创建导出画布。');
-    return;
-  }
-
-  const prevCtx = host.ctx;
-  const prevCanvas = host.activeRenderCanvas;
-  const prevScale = host.view.scale;
-  const prevOffsetX = host.view.offsetX;
-  const prevOffsetY = host.view.offsetY;
   try {
-    host.ctx = exportCtx;
-    host.activeRenderCanvas = exportCanvas;
-    const worldWidth = Math.max(1e-6, bounds.maxX - bounds.minX);
-    const worldHeight = Math.max(1e-6, bounds.maxY - bounds.minY);
-    host.view.scale = Math.min(exportCanvas.width / worldWidth, exportCanvas.height / worldHeight);
-    host.view.offsetX = -bounds.minX * host.view.scale + (exportCanvas.width - worldWidth * host.view.scale) / 2;
-    host.view.offsetY = bounds.maxY * host.view.scale + (exportCanvas.height - worldHeight * host.view.scale) / 2;
-    performRender({ exportMode: true });
-  } finally {
-    host.ctx = prevCtx;
-    host.activeRenderCanvas = prevCanvas;
-    host.view.scale = prevScale;
-    host.view.offsetX = prevOffsetX;
-    host.view.offsetY = prevOffsetY;
-    host.render();
-  }
+    const exportSize = calculateExportSize(bounds);
+    const exportCanvas = document.createElement('canvas');
+    exportCanvas.width = exportSize.width;
+    exportCanvas.height = exportSize.height;
+    const exportCtx = exportCanvas.getContext('2d');
+    if (!exportCtx) {
+      fail('当前浏览器无法创建导出画布。');
+      return;
+    }
 
-  const blob = await new Promise((resolve) => exportCanvas.toBlob(resolve, 'image/png'));
-  if (!blob) {
-    window.alert('图像导出失败。');
-    return;
+    const prevCtx = host.ctx;
+    const prevCanvas = host.activeRenderCanvas;
+    const prevScale = host.view.scale;
+    const prevOffsetX = host.view.offsetX;
+    const prevOffsetY = host.view.offsetY;
+    try {
+      host.ctx = exportCtx;
+      host.activeRenderCanvas = exportCanvas;
+      const worldWidth = Math.max(1e-6, bounds.maxX - bounds.minX);
+      const worldHeight = Math.max(1e-6, bounds.maxY - bounds.minY);
+      host.view.scale = Math.min(exportCanvas.width / worldWidth, exportCanvas.height / worldHeight);
+      host.view.offsetX = -bounds.minX * host.view.scale + (exportCanvas.width - worldWidth * host.view.scale) / 2;
+      host.view.offsetY = bounds.maxY * host.view.scale + (exportCanvas.height - worldHeight * host.view.scale) / 2;
+      if (typeof host.performRender !== 'function') {
+        throw new Error('导出渲染器未初始化');
+      }
+      host.performRender({ exportMode: true });
+    } finally {
+      host.ctx = prevCtx;
+      host.activeRenderCanvas = prevCanvas;
+      host.view.scale = prevScale;
+      host.view.offsetX = prevOffsetX;
+      host.view.offsetY = prevOffsetY;
+      host.render();
+    }
+
+    const blob = await new Promise((resolve) => exportCanvas.toBlob(resolve, 'image/png'));
+    if (!blob) {
+      fail('图像导出失败。');
+      return;
+    }
+    downloadBlob(blob, `${host.headerForm.name || 'opendrive_map'}_overlay.png`);
+    if (host.backgroundOverlayStatus) {
+      host.backgroundOverlayStatus.message = '叠加图已导出';
+      host.backgroundOverlayStatus.type = 'success';
+    }
+  } catch (error) {
+    fail(`叠加图导出失败：${host.formatErrorMessage(error)}`);
+  } finally {
+    if (host.backgroundOverlayStatus) host.backgroundOverlayStatus.loading = false;
   }
-  downloadBlob(blob, `${host.headerForm.name || 'opendrive_map'}_overlay.png`);
 }
 
 function junctionsForExport() {
